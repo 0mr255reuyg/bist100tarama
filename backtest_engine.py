@@ -283,10 +283,18 @@ STRAT_LABELS = {
     'trend':    '🟢 Trend Sürücüsü',
 }
 
+def _hex_to_rgba(hex_color, alpha=0.12):
+    """#rrggbb → 'rgba(r,g,b,alpha)' """
+    h = hex_color.lstrip('#')
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 def build_perf_chart(results_map, start_capital):
     """
     results_map: { strategy_key: (pv_df, bm_norm) }
-    Tüm stratejileri tek grafikte, bm bir kez çiz.
+    Üst panel: kümülatif % getiri (para yok, sadece %)
+    Alt panel: drawdown %
     """
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         row_heights=[0.68, 0.32], vertical_spacing=0.04)
@@ -294,15 +302,16 @@ def build_perf_chart(results_map, start_capital):
     bm_drawn = False
     for strat, (pv_df, bm_norm) in results_map.items():
         if pv_df is None: continue
-        color = STRAT_COLORS.get(strat, '#94a3b8')
-        label = STRAT_LABELS.get(strat, strat)
-        pv    = pv_df['value']
+        color     = STRAT_COLORS.get(strat, '#94a3b8')
+        label     = STRAT_LABELS.get(strat, strat)
+        pv        = pv_df['value']
+        cumret    = (pv / start_capital - 1) * 100   # kümülatif %
 
         fig.add_trace(go.Scatter(
-            x=pv_df.index, y=pv,
+            x=pv_df.index, y=cumret,
             name=label,
             line=dict(color=color, width=2.2),
-            hovertemplate=f"<b>{label}</b><br>₺%{{y:,.0f}}<extra></extra>",
+            hovertemplate=f"<b>{label}</b><br>%{{y:+.1f}}%<extra></extra>",
         ), row=1, col=1)
 
         # Drawdown
@@ -312,22 +321,22 @@ def build_perf_chart(results_map, start_capital):
             name=f"DD {label}",
             line=dict(color=color, width=1.2),
             fill='tozeroy',
-            fillcolor=color.replace('#', 'rgba(').replace(')', ',0.08)') if color.startswith('#') else color,
+            fillcolor=_hex_to_rgba(color, 0.12),
             showlegend=False,
             hovertemplate=f"DD: %{{y:.1f}}%<extra></extra>",
         ), row=2, col=1)
 
         if not bm_drawn and bm_norm is not None:
+            bm_ret = (bm_norm / start_capital - 1) * 100
             fig.add_trace(go.Scatter(
-                x=bm_norm.index, y=bm_norm,
+                x=bm_norm.index, y=bm_ret,
                 name='BIST 100',
                 line=dict(color='#f59e0b', width=1.5, dash='dot'),
-                hovertemplate="BIST100: ₺%{y:,.0f}<extra></extra>",
+                hovertemplate="BIST100: %{y:+.1f}%<extra></extra>",
             ), row=1, col=1)
             bm_drawn = True
 
-    # Başlangıç çizgisi
-    fig.add_hline(y=start_capital, line=dict(color='#475569', width=0.8, dash='dash'), row=1, col=1)
+    fig.add_hline(y=0, line=dict(color='#475569', width=0.8, dash='dash'), row=1, col=1)
     fig.add_hline(y=0, line=dict(color='#475569', width=0.6), row=2, col=1)
 
     fig.update_layout(
@@ -338,8 +347,10 @@ def build_perf_chart(results_map, start_capital):
                     bgcolor='rgba(0,0,0,0)', font=dict(size=11)),
         margin=dict(l=10, r=10, t=20, b=10),
         hovermode='x unified',
-        yaxis=dict(tickprefix='₺', tickformat=',.0f', gridcolor='#1e2535'),
-        yaxis2=dict(ticksuffix='%', gridcolor='#1e2535'),
+        yaxis=dict(ticksuffix='%', gridcolor='#1e2535',
+                   title=dict(text='Kümülatif Getiri', font=dict(size=10))),
+        yaxis2=dict(ticksuffix='%', gridcolor='#1e2535',
+                    title=dict(text='Drawdown', font=dict(size=10))),
         xaxis2=dict(gridcolor='#1e2535'),
         xaxis=dict(gridcolor='#1e2535'),
     )
