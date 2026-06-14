@@ -498,7 +498,7 @@ if st.session_state.page == "perf":
                     elif isinstance(val, str) and val.startswith('-'):
                         return 'color: #ef4444'
                     return ''
-                styled = mdf.style.applymap(color_pnl, subset=['Aylık P&L'] if 'Aylık P&L' in mdf.columns else [])
+                styled = mdf.style.map(color_pnl, subset=['Aylık P&L'] if 'Aylık P&L' in mdf.columns else [])
                 st.dataframe(styled, use_container_width=True, height=600)
             else:
                 st.markdown("*Veri yok.*")
