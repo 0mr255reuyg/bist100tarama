@@ -321,7 +321,7 @@ def build_perf_chart(results_map, start_capital):
             name=f"DD {label}",
             line=dict(color=color, width=1.2),
             fill='tozeroy',
-            fillcolor=_hex_to_rgba(color, 0.12),
+            opacity=0.4,
             showlegend=False,
             hovertemplate=f"DD: %{{y:.1f}}%<extra></extra>",
         ), row=2, col=1)
