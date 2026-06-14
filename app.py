@@ -412,9 +412,10 @@ if st.session_state.page == "perf":
         prog = st.progress(0, text="Backtest hesaplanıyor...")
         for i, sk in enumerate(strat_keys):
             prog.progress((i+1)/len(strat_keys), text=f"{STRAT_LABELS[sk]} hesaplanıyor...")
-            pv, bm_n, trades, active = run_backtest(sk, stock_bt, bm_df_bt)
+            pv, bm_n, trades, active, monthly = run_backtest(sk, stock_bt, bm_df_bt)
             bt_results[sk] = {
                 "pv": pv, "bm": bm_n, "trades": trades, "active": active,
+                "monthly": monthly,
                 "stats": calc_stats(pv, bm_n, 100_000) if pv is not None else {}
             }
         prog.empty()
@@ -480,6 +481,27 @@ if st.session_state.page == "perf":
                     f'<div class="metric-label">{k}</div>'
                     f'<div class="metric-value" style="color:{val_color};font-size:1rem">{v}</div>'
                     f'</div>', unsafe_allow_html=True)
+
+    # ── AYLIK TABLO ──────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 📅 Aylık Portföy Detayı — Top 5 Hisseler")
+    st.markdown("Her ay başında en yüksek puanlı 5 hisse · Skor = kaç kriter geçildi")
+    monthly_tabs = st.tabs([STRAT_LABELS["rs"], STRAT_LABELS["momentum"], STRAT_LABELS["trend"]])
+    for tab, sk in zip(monthly_tabs, ["rs", "momentum", "trend"]):
+        with tab:
+            mdf = bt_results[sk].get("monthly")
+            if mdf is not None and len(mdf) > 0:
+                # Aylık P&L renklendir
+                def color_pnl(val):
+                    if isinstance(val, str) and val.startswith('+'):
+                        return 'color: #22c55e'
+                    elif isinstance(val, str) and val.startswith('-'):
+                        return 'color: #ef4444'
+                    return ''
+                styled = mdf.style.applymap(color_pnl, subset=['Aylık P&L'] if 'Aylık P&L' in mdf.columns else [])
+                st.dataframe(styled, use_container_width=True, height=600)
+            else:
+                st.markdown("*Veri yok.*")
 
     # ── İŞLEM LOGU ──────────────────────────────────────────────────────────
     st.markdown("---")
