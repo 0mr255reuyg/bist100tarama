@@ -67,21 +67,21 @@ def _score_at(strategy, df, bm_df, date):
         price = float(c_s.iloc[-1])
         vr    = _vol_ratio_at(v_s)
 
-        if strategy == "rs":
-            if len(c_s) < 63: return 0, 5
+        if strategy == "emre":
+            if len(c_s) < 25: return 0, 4
+            s20   = float(_sma(c_s, 20).iloc[-1])
             s50   = float(_sma(c_s, 50).iloc[-1])
             rsi_v = float(_rsi(c_s).iloc[-1])
-            k_l, _ = _stoch(h_s, lo_s, c_s)
-            k_now  = float(k_l.iloc[-1]); k_prev = float(k_l.iloc[-2])
-            rs     = _rs_at(c_s, bm, date)
+            rs    = _rs_at(c_s, bm, date, days=20)
+            vol5  = float(v_s.iloc[-5:].mean())
+            vol20 = float(v_s.iloc[-20:].mean()) if len(v_s) >= 20 else vol5
             checks = [
-                price > s50,
-                50 <= rsi_v <= 70,
-                k_now > k_prev and k_prev < 40,
-                (not np.isnan(vr)) and vr >= 0.99,
                 (rs is not None) and (not np.isnan(rs)) and rs > 0,
+                price > s20 and price > s50,
+                vol5 >= vol20 * 0.85,
+                rsi_v < 80,
             ]
-            return sum(checks), 5
+            return sum(checks), 4
 
         elif strategy == "momentum":
             if len(c_s) < 60: return 0, 4
@@ -96,20 +96,6 @@ def _score_at(strategy, df, bm_df, date):
                 hn > 0 and hn > hp,
                 (not np.isnan(atr_avg)) and atr_now > atr_avg,
                 (not np.isnan(vr)) and vr > 1.2,
-            ]
-            return sum(checks), 4
-
-        elif strategy == "trend":
-            if len(c_s) < 200: return 0, 4
-            e20  = float(_ema(c_s, 20).iloc[-1])
-            e50  = float(_ema(c_s, 50).iloc[-1])
-            e200 = float(_ema(c_s, 200).iloc[-1])
-            rsi_v = float(_rsi(c_s).iloc[-1])
-            checks = [
-                e20 > e50 > e200,
-                price > e20,
-                50 <= rsi_v <= 65,
-                (not np.isnan(vr)) and vr >= 1.2,
             ]
             return sum(checks), 4
 
@@ -164,20 +150,27 @@ def run_backtest(strategy, stock_data, benchmark_df,
         # Tarama: tüm hisseleri skorla
         candidates = []
         for tkr, df in stock_data.items():
-            if df is None or len(df) < 55: continue
+            if df is None or len(df) < 25: continue
             sc, mx = _score_at(strategy, df, benchmark_df, rdate)
             if sc == 0: continue
             c = df['Close'].squeeze()
+            bm_c = benchmark_df['Close'].squeeze()
             vd = c.index[c.index <= rdate]
             if len(vd):
                 price = float(c.loc[vd[-1]])
+                c_s   = c.loc[vd]
+                rs_val = _rs_at(c_s, bm_c, rdate, days=20)
+                rs_val = rs_val if (rs_val is not None and not np.isnan(rs_val)) else -999
                 candidates.append({
                     'ticker': tkr, 'score': sc,
-                    'max': mx, 'price': price
+                    'max': mx, 'price': price, 'rs': rs_val
                 })
 
-        # En yüksek puanlı top_n
-        candidates.sort(key=lambda x: (x['score'], x['ticker']), reverse=True)
+        # Emre stratejisinde RS'e göre, diğerlerinde skora göre sırala
+        if strategy == "emre":
+            candidates.sort(key=lambda x: x['rs'], reverse=True)
+        else:
+            candidates.sort(key=lambda x: (x['score'], x['ticker']), reverse=True)
         top5 = candidates[:top_n]
         target_tickers = {q['ticker'] for q in top5}
 
