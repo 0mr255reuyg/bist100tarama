@@ -9,7 +9,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from backtest_engine import run_backtest, calc_stats, build_perf_chart, STRAT_LABELS, STRAT_COLORS
-from sectors import get_sector, get_theme_sectors, MACRO_THEMES, SECTOR_MAP
+from sectors import get_sector, get_theme_sectors, get_theme_info, MACRO_THEMES, MACRO_THEMES_PRIMARY, MACRO_THEMES_SECONDARY, SECTOR_MAP, BIST100_OFFICIAL, ALL_SECTORS
 from sector_summary import build_summary, build_sector_bar_chart
 
 st.set_page_config(page_title="BIST 100 Strateji Tarayıcı", page_icon="📈",
@@ -38,18 +38,9 @@ div[data-testid="stButton"] button{border-radius:8px;font-weight:500;font-size:.
 """, unsafe_allow_html=True)
 
 # ── BIST 100 ──────────────────────────────────────────────────────────────────
-BIST100_TICKERS = [
-    "ACSEL","AEFES","AGESA","AGHOL","AKBNK","AKCNS","AKGRT","AKSA","AKSEN","AKSGY",
-    "ALARK","ALBRK","ALFAS","ALGYO","ALKIM","ANACM","ANSGR","ARCLK","ARDYZ","ARENA",
-    "ASELS","ASTOR","ASUZU","ATAGY","AYGAZ","BAGFS","BERA","BIMAS","BIOEN","BIRGY",
-    "BIZIM","BNTAS","BOBET","BRISA","BRSAN","BRYAT","BSOKE","BTCIM","BUCIM","BURCE",
-    "CCOLA","CEMTS","CIMSA","CLEBI","CMBTN","CMENT","CONSE","CRFSA","DOAS","DOHOL",
-    "ECILC","EGEEN","EKGYO","ENKAI","EREGL","FROTO","GARAN","GUBRF","HALKB","ISCTR",
-    "ISGYO","ISGSY","KARSN","KCHOL","KLGYO","KONTR","KORDS","KOZAA","KOZAL","KRDMD",
-    "LOGO","MAVI","MGROS","NETAS","ODAS","OTKAR","OYAKC","PGSUS","PETKM","PTOFS",
-    "SAHOL","SASA","SELEC","SISE","SKBNK","SOKM","TAVHL","TCELL","THYAO","TKFEN",
-    "TOASO","TSKB","TTKOM","TTRAK","TUPRS","TURSG","ULKER","VAKBN","VESTL","YKBNK",
-]
+# Güncel BIST 100 — sectors.py'den otomatik alınır
+from sectors import BIST100_OFFICIAL
+BIST100_TICKERS = BIST100_OFFICIAL
 BIST100_YF = [t + ".IS" for t in BIST100_TICKERS]
 
 # ── VERİ ÇEKME ────────────────────────────────────────────────────────────────
@@ -113,15 +104,89 @@ def rs_score(c, bm_c, days=20):
 def fetch_fundamentals(ticker):
     try:
         info = yf.Ticker(ticker).info
-        return {
-            "F/K":      info.get("trailingPE"),
-            "PD/DD":    info.get("priceToBook"),
-            "Kar Büyümesi": info.get("earningsGrowth"),
-            "ROE":      info.get("returnOnEquity"),
+        raw = {
+            "F/K":            info.get("trailingPE"),
+            "PD/DD":          info.get("priceToBook"),
+            "Kar Büyümesi":   info.get("earningsGrowth"),
+            "ROE":            info.get("returnOnEquity"),
             "Borç/Özsermaye": info.get("debtToEquity"),
+            "Net Marj":       info.get("profitMargins"),
+            "52H Yüksek":     info.get("fiftyTwoWeekHigh"),
+            "52H Düşük":      info.get("fiftyTwoWeekLow"),
+            "Piy. Değeri":    info.get("marketCap"),
+            "Beta":           info.get("beta"),
         }
+        return {k: v for k, v in raw.items() if v is not None}
     except Exception:
         return {}
+
+def market_condition_score(df, bm_df):
+    """
+    Hisse için piyasa durumu özeti:
+    Trend gücü, momentum, hacim kalitesi, volatilite, RS
+    Her biri 0-100 puan → genel skor
+    """
+    try:
+        c  = df["Close"].squeeze(); h = df["High"].squeeze()
+        lo = df["Low"].squeeze();   v = df["Volume"].squeeze()
+        bm = bm_df["Close"].squeeze()
+        price = float(c.iloc[-1])
+
+        # 1. Trend gücü — SMA pozisyonu
+        s20 = float(sma(c,20).iloc[-1]); s50 = float(sma(c,50).iloc[-1])
+        trend_score = 0
+        if price > s20: trend_score += 40
+        if price > s50: trend_score += 40
+        if s20 > s50:   trend_score += 20
+
+        # 2. Momentum — RSI pozisyonu (50-70 ideal)
+        rsi_v = float(rsi_calc(c).iloc[-1])
+        if 50 <= rsi_v <= 70:   mom_score = 100
+        elif 40 <= rsi_v < 50:  mom_score = 60
+        elif 70 < rsi_v <= 80:  mom_score = 50
+        elif rsi_v > 80:        mom_score = 10
+        else:                   mom_score = 20
+
+        # 3. Hacim kalitesi
+        vol5  = float(v.iloc[-5:].mean())
+        vol20 = float(v.rolling(20).mean().iloc[-1]) if len(v) >= 20 else vol5
+        vr = vol5 / vol20 if vol20 > 0 else 1
+        vol_score = min(100, int(vr * 70))
+
+        # 4. Volatilite (düşük = iyi, ATR/fiyat %)
+        a14   = atr_calc(h, lo, c)
+        atr_v = float(a14.iloc[-1])
+        atr_pct = (atr_v / price * 100) if price > 0 else 5
+        vol_risk = max(0, 100 - int(atr_pct * 8))
+
+        # 5. Rölatif güç
+        rs = rs_score(c, bm, 20)
+        if rs is None or np.isnan(rs): rs_s = 50
+        elif rs > 0.05:  rs_s = 100
+        elif rs > 0:     rs_s = 75
+        elif rs > -0.05: rs_s = 40
+        else:            rs_s = 10
+
+        total = int(trend_score * 0.30 + mom_score * 0.25 + vol_score * 0.15 +
+                    vol_risk * 0.10 + rs_s * 0.20)
+
+        return {
+            "scores": {
+                "Trend Gücü":    trend_score,
+                "Momentum":      mom_score,
+                "Hacim Kalitesi":vol_score,
+                "Düşük Risk":    vol_risk,
+                "RS Gücü":       rs_s,
+            },
+            "total": total,
+            "rsi":   rsi_v,
+            "atr_pct": atr_pct,
+            "rs_pct": rs * 100 if rs and not np.isnan(rs) else 0,
+            "trend": "Yükseliş ✅" if price > s20 > s50 else (
+                      "Zayıf ⚠️" if price > s50 else "Düşüş ❌"),
+        }
+    except Exception:
+        return None
 
 # ── STRATEJİ 1: EMRENİN STRATEJİSİ ──────────────────────────────────────────
 def score_emre(df, bm_df):
@@ -377,14 +442,50 @@ def render_detail(result, strategy, interval):
                 f"  `{result['score']}/{result['max_score']}`",
                 unsafe_allow_html=True)
 
-    # Temel analiz
+    # ── Piyasa Durumu Analizi ──────────────────────────────────────
+    mc = market_condition_score(result["df"], st.session_state.get("bm_df") or result["df"])
+    if mc:
+        total = mc["total"]
+        total_color = "#22c55e" if total >= 70 else ("#f59e0b" if total >= 45 else "#ef4444")
+        total_label = "Güçlü 🚀" if total >= 70 else ("Orta ⚠️" if total >= 45 else "Zayıf ❌")
+
+        st.markdown(
+            f'<div class="metric-card" style="border-color:{total_color}44;margin-bottom:.8rem">' 
+            f'<div style="display:flex;justify-content:space-between;align-items:center">' 
+            f'<div><div class="metric-label">📊 Piyasa Durumu Skoru</div>' 
+            f'<div style="font-size:2rem;font-weight:700;color:{total_color};font-family:JetBrains Mono">{total}/100</div>' 
+            f'<div style="font-size:.8rem;color:{total_color};margin-top:.2rem">{total_label}</div></div>' 
+            f'<div style="font-size:.75rem;color:#94a3b8;text-align:right;font-family:JetBrains Mono">' 
+            f'Trend: {mc["trend"]}<br>RSI: {mc["rsi"]:.1f}<br>ATR: %{mc["atr_pct"]:.1f}<br>RS: {mc["rs_pct"]:+.1f}%</div>' 
+            f'</div></div>', unsafe_allow_html=True)
+
+        # Radar benzeri skor çubukları
+        sc_cols = st.columns(len(mc["scores"]))
+        for col, (k, v2) in zip(sc_cols, mc["scores"].items()):
+            bar_color = "#22c55e" if v2 >= 70 else ("#f59e0b" if v2 >= 40 else "#ef4444")
+            col.markdown(
+                f'<div class="metric-card" style="text-align:center;padding:.8rem .5rem">' 
+                f'<div class="metric-label">{k}</div>' 
+                f'<div style="font-size:1.2rem;font-weight:700;color:{bar_color};font-family:JetBrains Mono">{v2}</div>' 
+                f'<div style="background:#1e2535;border-radius:4px;height:4px;margin-top:.4rem">' 
+                f'<div style="background:{bar_color};width:{v2}%;height:4px;border-radius:4px"></div></div>' 
+                f'</div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ── Temel Analiz ──────────────────────────────────────────────
     with st.expander("📋 Temel Analiz", expanded=False):
         fund = fetch_fundamentals(result["ticker"])
         if fund:
-            fc = st.columns(len(fund))
+            fc = st.columns(min(len(fund), 5))
             for i, (k, v2) in enumerate(fund.items()):
-                val_str = f"{v2:.2f}" if isinstance(v2, float) and not np.isnan(v2) else (str(v2) if v2 else "N/A")
-                fc[i].markdown(
+                if isinstance(v2, float) and not np.isnan(v2):
+                    if k == "Piy. Değeri": val_str = f"₺{v2/1e9:.1f}Mrd"
+                    elif k in ("Kar Büyümesi","ROE","Net Marj"): val_str = f"%{v2*100:.1f}"
+                    else: val_str = f"{v2:.2f}"
+                else:
+                    val_str = str(v2) if v2 else "N/A"
+                fc[i%5].markdown(
                     f'<div class="metric-card"><div class="metric-label">{k}</div>'
                     f'<div class="metric-value" style="font-size:.95rem">{val_str}</div></div>',
                     unsafe_allow_html=True)
@@ -434,8 +535,13 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 🌍 Makro Tema Filtresi")
-    macro_theme  = st.selectbox("Tema seç", ["—"] + list(MACRO_THEMES.keys()))
-    macro_btn    = st.button("Tema'ya Göre Tara", use_container_width=True)
+    st.markdown("**Öncelikli Temalar:**")
+    primary_options = ["—"] + list(MACRO_THEMES_PRIMARY.keys())
+    st.markdown("**Diğer Temalar:**")
+    secondary_options = list(MACRO_THEMES_SECONDARY.keys())
+    all_theme_options = ["—"] + list(MACRO_THEMES_PRIMARY.keys()) + ["──────────"] + list(MACRO_THEMES_SECONDARY.keys())
+    macro_theme  = st.selectbox("Tema seç", all_theme_options)
+    macro_btn    = st.button("Tema\'ya Göre Tara", use_container_width=True)
 
     st.markdown("---")
     perf_btn   = st.button("📊 Performans",      use_container_width=True, type="primary")
@@ -658,22 +764,40 @@ if st.session_state.page == "perf":
     st.stop()
 
 # ── MAKRO TEMA SAYFASI ────────────────────────────────────────────────────────
-if macro_btn and macro_theme != "—":
-    st.markdown(f"## 🌍 {macro_theme} — Sektör Taraması")
-    theme_sectors = get_theme_sectors(macro_theme)
-    st.markdown(f"**Hedef sektörler:** {' · '.join(theme_sectors)}")
+if macro_btn and macro_theme not in ["—", "──────────"]:
+    theme_info    = get_theme_info(macro_theme)
+    theme_sectors = theme_info.get("sektörler", [])
+    aciklama      = theme_info.get("açıklama", "")
+    one_cikanlar  = theme_info.get("öne_çıkan", [])
+
+    st.markdown(f"## 🌍 {macro_theme}")
+    st.markdown(f"*{aciklama}*")
+
+    # Öne çıkan hisseler kartları
+    if one_cikanlar:
+        st.markdown("**⭐ Öne Çıkan Hisseler (Tarihsel):**")
+        oc_cols = st.columns(len(one_cikanlar))
+        for col, tkr in zip(oc_cols, one_cikanlar):
+            sect = get_sector(tkr)
+            col.markdown(
+                f'<div class="metric-card" style="text-align:center">'
+                f'<div style="font-weight:700;color:#f1f5f9;font-size:.9rem">{tkr}</div>'
+                f'<div style="font-size:.65rem;color:#64748b;margin-top:.2rem">{sect}</div>'
+                f'</div>', unsafe_allow_html=True)
+
+    st.markdown(f"**Hedef Sektörler:** {' · '.join(theme_sectors)}")
     st.markdown("---")
 
     theme_tickers = [t + ".IS" for t, s in SECTOR_MAP.items()
                      if s in theme_sectors and t in BIST100_TICKERS]
 
     with st.spinner("Veri çekiliyor..."):
-        bm_df   = fetch_benchmark(period, interval)
-        td      = fetch_data(theme_tickers, period, interval)
+        bm_df = fetch_benchmark(period, interval)
+        td    = fetch_data(theme_tickers, period, interval)
 
     rows = []
     for ticker, df in td.items():
-        if df is None or len(df) < 55: continue
+        if df is None or len(df) < 25: continue
         try:
             sc_e, mx_e, _, _ = score_emre(df, bm_df)
             sc_m, mx_m, _, _ = score_momentum(df, bm_df)
@@ -683,22 +807,33 @@ if macro_btn and macro_theme != "—":
             rows.append({
                 'Hisse':    ticker.replace('.IS',''),
                 'Sektör':   get_sector(ticker),
-                'Emre':     f"{sc_e}/{mx_e}",
-                'Momentum': f"{sc_m}/{mx_m}",
+                'Emre Skoru':     f"{sc_e}/{mx_e}",
+                'Momentum Skoru': f"{sc_m}/{mx_m}",
                 'RS (20g)': f"{rs*100:.1f}%" if rs and not np.isnan(rs) else "N/A",
                 'Fiyat':    f"₺{float(c.iloc[-1]):.2f}",
                 '_emre_sc': sc_e, '_mom_sc': sc_m,
+                '_rs': rs if rs and not np.isnan(rs) else -999,
             })
         except Exception:
             pass
 
     if rows:
-        df_rows = pd.DataFrame(rows).sort_values('_emre_sc', ascending=False)
-        display = df_rows.drop(columns=['_emre_sc','_mom_sc'])
-        st.dataframe(display, use_container_width=True, height=400)
+        df_rows = pd.DataFrame(rows).sort_values(['_emre_sc','_rs'], ascending=False)
+        display = df_rows.drop(columns=['_emre_sc','_mom_sc','_rs'])
 
-        st.markdown("**Hisse detayı için aşağıdan seç:**")
-        sel_theme = st.selectbox("Hisse", [r['Hisse'] for r in rows])
+        def color_score(val):
+            if isinstance(val, str) and '/' in val:
+                parts = val.split('/')
+                if parts[0] == parts[1]: return 'color: #22c55e; font-weight: 600'
+                elif int(parts[0]) >= int(parts[1])-1: return 'color: #f59e0b'
+            return ''
+
+        styled = display.style.map(color_score, subset=['Emre Skoru','Momentum Skoru'])
+        st.dataframe(styled, use_container_width=True, height=400)
+
+        st.markdown("---")
+        st.markdown("**📈 Hisse Detayı:**")
+        sel_theme = st.selectbox("Hisse seç", [r['Hisse'] for r in rows])
         if sel_theme:
             tkr_yf = sel_theme + ".IS"
             if tkr_yf in td:
