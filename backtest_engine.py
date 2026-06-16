@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from sectors import get_sector  # Sektör kontrolü için eklendi
+from sectors import get_sector
 
 
 # ── İNDİKATÖRLER ─────────────────────────────────────────────────────────────
@@ -178,19 +178,16 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
             x['rs']
         ), reverse=True)
         
-        # Max 2 Hisse / Sektör Filtresi
-        if strategy == "emre":
-            top5 = []
-            sector_counts = {}
-            for cand in candidates:
-                sect = get_sector(cand['ticker'])
-                if sector_counts.get(sect, 0) < 2:
-                    top5.append(cand)
-                    sector_counts[sect] = sector_counts.get(sect, 0) + 1
-                if len(top5) == top_n:
-                    break
-        else:
-            top5 = candidates[:top_n]
+        # Max 2 Hisse / Sektör Filtresi (TÜM STRATEJİLER İÇİN GEÇERLİ)
+        top5 = []
+        sector_counts = {}
+        for cand in candidates:
+            sect = get_sector(cand['ticker'])
+            if sector_counts.get(sect, 0) < 2:
+                top5.append(cand)
+                sector_counts[sect] = sector_counts.get(sect, 0) + 1
+            if len(top5) == top_n:
+                break
 
         target_tickers = {q['ticker'] for q in top5}
 
