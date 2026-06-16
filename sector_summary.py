@@ -1,7 +1,7 @@
 """
 Sektörel Özet Modülü
-Fotoğraftaki gibi: Bugün Lider, İvme Kazanan, 1H Zirve, 1A Zirve,
-Toparlayan, Bugün Geride, 1H Dip, 1A Dip, Yavaşlayan
+Fotoğraftaki gibi: Son Kapanış Lideri, İvme Kazanan, 1H Zirve, 1A Zirve,
+Toparlayan, Son Kapanışta Geride, 1H Dip, 1A Dip, Yavaşlayan
 """
 import pandas as pd
 import numpy as np
@@ -9,11 +9,9 @@ import plotly.graph_objects as go
 from sectors import SECTOR_MAP
 
 def _sector_returns(stock_data):
-    # 1. Ortak en güncel tarihi bul (Zaman kaymasını / yfinance bug'ını önlemek için)
     valid_dfs = [df for df in stock_data.values() if df is not None and not df.empty]
     if not valid_dfs: return pd.DataFrame()
     
-    # En çok tekrar eden "son işlem gününü" referans al
     last_dates = [df.index[-1] for df in valid_dfs]
     common_last_date = pd.Series(last_dates).mode()[0]
 
@@ -21,10 +19,8 @@ def _sector_returns(stock_data):
     for ticker, df in stock_data.items():
         if df is None or len(df) < 45: continue
         try:
-            # 2. Veriyi ortak güne kadar kes (Elmalarla armutlar karışmasın)
             c = df['Close'].loc[:common_last_date].dropna()
             
-            # Eğer hissenin o gün verisi yoksa veya eksikse, hesaplamaya katma
             if len(c) < 25 or c.index[-1] != common_last_date:
                 continue
 
@@ -54,7 +50,6 @@ def _sector_returns(stock_data):
 
     df_all = pd.DataFrame(rows)
     
-    # Sektörlere göre topla ve hisse sayısına böl (mean)
     sect_df = df_all.groupby('sector').agg(
         ret_1d=('ret_1d','mean'),
         ret_5d=('ret_5d','mean'),
@@ -91,15 +86,15 @@ def build_summary(stock_data):
     def fmt(val): return f"{val:+.2f}%"
 
     return {
-        "🚀 BUGÜN LİDER":      [(s, fmt(v)) for s,v in top_1d],
-        "⚡ İVME KAZANAN":     [(s, fmt(v)) for s,v in ivme],
-        "📈 1 HAFTA ZİRVE":    [(s, fmt(v)) for s,v in top_5d],
-        "🏆 1 AY ZİRVE":       [(s, fmt(v)) for s,v in top_21d],
-        "🔄 TOPARLAYAN":       [(s, fmt(v)) for s,v in toparlayan] or [("—","")],
-        "📉 BUGÜN GERİDE":     [(s, fmt(v)) for s,v in bot_1d],
-        "❄️ 1 HAFTA DİP":     [(s, fmt(v)) for s,v in bot_5d],
-        "🪨 1 AY DİP":         [(s, fmt(v)) for s,v in bot_21d],
-        "🐌 YAVAŞLAYAN":       [(s, fmt(v)) for s,v in yavas],
+        "🚀 SON KAPANIŞ LİDERİ":   [(s, fmt(v)) for s,v in top_1d],
+        "⚡ İVME KAZANAN":        [(s, fmt(v)) for s,v in ivme],
+        "📈 1 HAFTA ZİRVE":       [(s, fmt(v)) for s,v in top_5d],
+        "🏆 1 AY ZİRVE":          [(s, fmt(v)) for s,v in top_21d],
+        "🔄 TOPARLAYAN":          [(s, fmt(v)) for s,v in toparlayan] or [("—","")],
+        "📉 SON KAPANIŞTA GERİDE": [(s, fmt(v)) for s,v in bot_1d],
+        "❄️ 1 HAFTA DİP":        [(s, fmt(v)) for s,v in bot_5d],
+        "🪨 1 AY DİP":            [(s, fmt(v)) for s,v in bot_21d],
+        "🐌 YAVAŞLAYAN":          [(s, fmt(v)) for s,v in yavas],
     }
 
 
@@ -112,7 +107,7 @@ def build_sector_bar_chart(stock_data):
     fig = go.Figure()
     fig.add_trace(go.Bar(
         y=df['sector'], x=df['ret_1d'],
-        name='Bugün', orientation='h',
+        name='Son Kapanış', orientation='h',
         marker_color=['#22c55e' if v >= 0 else '#ef4444' for v in df['ret_1d']],
         opacity=0.9,
     ))
