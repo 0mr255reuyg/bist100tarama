@@ -32,6 +32,21 @@ html,body,[class*="css"]{font-family:'Inter',sans-serif;}
   font-family:'JetBrains Mono',monospace;margin:1rem 0 .5rem 0;border-bottom:1px solid #1e2535;padding-bottom:.3rem;}
 .stag{display:inline-block;padding:.1rem .45rem;border-radius:4px;font-size:.65rem;
   font-family:'JetBrains Mono',monospace;background:#1e2535;color:#94a3b8;margin-left:.3rem;}
+
+/* UI DÜZELTMESİ: Beyaz zemin üstündeki buton yazılarının simsiyah ve okunaklı olması için */
+div[data-testid="stButton"] button {
+    background-color: #f8fafc !important;
+    border: 1px solid #cbd5e1 !important;
+}
+div[data-testid="stButton"] button p {
+    color: #000000 !important;
+    font-weight: 800 !important;
+    font-size: 1.05rem !important;
+}
+div[data-testid="stButton"] button:hover {
+    background-color: #e2e8f0 !important;
+    border-color: #94a3b8 !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -132,7 +147,6 @@ def vol_ratio(v, n=20):
 
 def rs_score(c, bm_c, days=20):
     if len(c) < days+1 or len(bm_c) < days+1: return np.nan
-    # Ortak son tarihe göre hizala
     common = c.index.intersection(bm_c.index)
     if len(common) < days+1: return np.nan
     c2 = c.loc[common]; bm2 = bm_c.loc[common]
@@ -153,7 +167,6 @@ def score_emre(df, bm_df):
         rsi_v = float(rsi_calc(c).iloc[-1])
         rs = rs_score(c, bm, 20) if len(bm) > 20 else np.nan
 
-        # Hacim
         vr = vol_ratio(v, 20)
         vol5 = float(v.iloc[-5:].mean()) if len(v) >= 5 else np.nan
         vol20 = float(v.rolling(20).mean().iloc[-1]) if len(v) >= 20 else np.nan
@@ -223,55 +236,6 @@ STRATEGY_FN = {
     "momentum": (score_momentum, "Momentum Kırılımcısı"),
 }
 
-# ── EMRE TARAMA (sektör filtreli) ─────────────────────────────────────────────
-def run_emre_scan(stock_data, bm_df):
-    bm = _c(bm_df) if not bm_df.empty else pd.Series(dtype=float)
-    candidates = []
-    for ticker, df in stock_data.items():
-        if df is None or len(df) < 22: continue
-        try:
-            c = _c(df)
-            rs = rs_score(c, bm, 20)
-            if np.isnan(rs) or rs <= 0: continue
-            candidates.append({'ticker': ticker, 'rs': rs, 'df': df})
-        except Exception:
-            continue
-
-    candidates.sort(key=lambda x: x['rs'], reverse=True)
-    top15 = candidates[:15]
-
-    filtered = []
-    for cand in top15:
-        df = cand['df']
-        c = _c(df); v = _v(df)
-        if len(c) < 22: continue
-        try:
-            price = float(c.iloc[-1])
-            s20 = float(sma(c,20).iloc[-1])
-            s50 = float(sma(c,50).iloc[-1]) if len(c)>=50 else s20
-            if price <= s20 or price <= s50: continue
-            vr = vol_ratio(v, 20)
-            if np.isnan(vr) or vr < 0.9: continue
-            rsi_v = float(rsi_calc(c).iloc[-1])
-            if rsi_v >= 80: continue
-            cand['sector'] = get_sector(cand['ticker'])
-            cand['price'] = price
-            filtered.append(cand)
-        except Exception:
-            continue
-
-    # Sektör filtresi max 2
-    sector_count = {}
-    final = []
-    for cand in filtered:
-        sec = cand['sector']
-        if sector_count.get(sec, 0) >= 2: continue
-        sector_count[sec] = sector_count.get(sec,0) + 1
-        final.append(cand)
-        if len(final) >= 5: break
-
-    return final, filtered
-
 # ── GRAFİK ────────────────────────────────────────────────────────────────────
 def build_chart(df, ticker, strategy, interval):
     c = _c(df); h = _h(df); l = _l(df); v = _v(df); o = df['Open'].squeeze()
@@ -336,7 +300,6 @@ def render_detail(result, strategy, interval):
                 f'`{result["score"]}/{result["max_score"]}`',
                 unsafe_allow_html=True)
 
-    # Kriterler
     c1, c2 = st.columns(2)
     for i,(k,(passed,val)) in enumerate(result["criteria"].items()):
         icon="✅" if passed else "❌"
@@ -345,7 +308,6 @@ def render_detail(result, strategy, interval):
               f'<div class="mv {col}">{icon} {val}</div></div>')
         (c1 if i%2==0 else c2).markdown(html, unsafe_allow_html=True)
 
-    # İndikatör değerleri
     if result["details"]:
         st.markdown('<div class="sec">📐 İndikatör Değerleri</div>', unsafe_allow_html=True)
         dc = st.columns(3)
@@ -355,7 +317,6 @@ def render_detail(result, strategy, interval):
                 f'<div class="mv" style="font-size:.9rem">{v}</div></div>',
                 unsafe_allow_html=True)
 
-    # Grafik
     st.markdown('<div class="sec">📈 Grafik</div>', unsafe_allow_html=True)
     fig = build_chart(result["df"], result["ticker"], strategy, interval)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar":False})
@@ -411,7 +372,7 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.caption("🟡 Emre: RS>0 · SMA20&50 · Hacim · RSI<80 · Max 2/sektör")
+    st.caption("🟡 Emre: Puan ve RS Değerine Göre En İyi 5 Hisseyi Getirir")
     st.caption("🟣 Momentum: SMA50 · MACD artan · ATR genişleme · Hacim")
 
 # ── STRATEJI BUTONLARI ───────────────────────────────────────────
@@ -721,27 +682,32 @@ if not st.session_state.scan_done:
         stock_data = fetch_data(BIST100_YF, period, interval)
 
     if strategy == "emre":
-        final5, filtered_all = run_emre_scan(stock_data, bm_df)
-        top5_set = {f['ticker'] for f in final5}
+        # Katı filtrelemeyi kaldırdık, her koşulda en iyi 5 hisseyi bulacak
         results = []
-        for cand in filtered_all:
-            sc,mx,crit,det = score_emre(cand['df'], bm_df)
-            results.append({"ticker":cand['ticker'],"score":sc,"max_score":mx,
-                            "criteria":crit,"details":det,"df":cand['df'],
-                            "rs":cand.get('rs',0),"sector":cand.get('sector',''),
-                            "in_top5":cand['ticker'] in top5_set})
-        results.sort(key=lambda x: x.get('rs',0), reverse=True)
-        # Diğer hisseler (filtrelenmemiş)
-        scanned_tickers = {c['ticker'] for c in filtered_all}
         for ticker, df in stock_data.items():
-            if ticker in scanned_tickers or df is None or len(df)<22: continue
+            if df is None or len(df)<22: continue
             try:
-                sc,mx,crit,det = score_emre(df, bm_df)
-                results.append({"ticker":ticker,"score":sc,"max_score":mx,
-                                "criteria":crit,"details":det,"df":df,
-                                "rs":0,"sector":get_sector(ticker),"in_top5":False})
+                sc, mx, crit, det = score_emre(df, bm_df)
+                c = _c(df)
+                bm = _c(bm_df)
+                rs = rs_score(c, bm, 20)
+                rs_val = rs if not np.isnan(rs) else -999
+                
+                results.append({
+                    "ticker": ticker, "score": sc, "max_score": mx,
+                    "criteria": crit, "details": det, "df": df,
+                    "rs": rs_val, "sector": get_sector(ticker), "in_top5": False
+                })
             except Exception:
                 pass
+                
+        # Önce Puana, Puanlar eşitse RS (Rölatif Güç) değerine göre en iyiden kötüye sırala
+        results.sort(key=lambda x: (x['score'], x['rs']), reverse=True)
+        
+        # En üstteki 5 hisseyi garantili olarak al
+        for r in results[:5]: 
+            r['in_top5'] = True
+
     else:
         results = []
         for ticker, df in stock_data.items():
@@ -777,7 +743,7 @@ with left_col:
     for r in top5_r:
         lbl = r["ticker"].replace(".IS","")
         sect = r.get("sector","")
-        rs_s = f" RS:{r['rs']*100:.1f}%" if r.get('rs') else ""
+        rs_s = f" RS:{r['rs']*100:.1f}%" if r.get('rs') and r['rs'] != -999 else ""
         if st.button(f"⭐ {lbl} {r['score']}/{r['max_score']}{rs_s} [{sect}]",
                      key=f"t5_{r['ticker']}", use_container_width=True):
             st.session_state.selected_ticker = r["ticker"]
