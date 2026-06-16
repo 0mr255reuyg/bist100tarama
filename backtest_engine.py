@@ -51,7 +51,7 @@ def _rs_at(c_s, bm, date, days=63):
 def _score_at(strategy, df, bm_df, date):
     """
     Belirtilen tarihe kadar olan veriyle kaç kriter geçildi döner.
-    (score, max_score, max_criteria_count)
+    (score, max_score)
     """
     try:
         c  = df['Close'].squeeze()
@@ -61,30 +61,29 @@ def _score_at(strategy, df, bm_df, date):
         bm = bm_df['Close'].squeeze()
 
         valid = c.index[c.index <= date]
-        if len(valid) < 55: return 0, 1
+        if len(valid) < 55: return 0, 4 # Veri yetersizse 0 puan dön
         c_s  = c.loc[valid]; h_s = h.loc[valid]
         lo_s = lo.loc[valid]; v_s = v.loc[valid]
         price = float(c_s.iloc[-1])
         vr    = _vol_ratio_at(v_s)
 
         if strategy == "emre":
-            if len(c_s) < 25: return 0, 4
             s20   = float(_sma(c_s, 20).iloc[-1])
             s50   = float(_sma(c_s, 50).iloc[-1])
             rsi_v = float(_rsi(c_s).iloc[-1])
             rs    = _rs_at(c_s, bm, date, days=20)
             vol5  = float(v_s.iloc[-5:].mean())
             vol20 = float(v_s.iloc[-20:].mean()) if len(v_s) >= 20 else vol5
+            
             checks = [
                 (rs is not None) and (not np.isnan(rs)) and rs > 0,
                 price > s20 and price > s50,
                 vol5 >= vol20 * 0.85,
-                rsi_v < 80,
+                (not np.isnan(rsi_v)) and rsi_v < 80,
             ]
             return sum(checks), 4
 
         elif strategy == "momentum":
-            if len(c_s) < 60: return 0, 4
             s50 = float(_sma(c_s, 50).iloc[-1])
             _, _, hl = _macd(c_s)
             hn = float(hl.iloc[-1]); hp = float(hl.iloc[-2])
@@ -101,7 +100,7 @@ def _score_at(strategy, df, bm_df, date):
 
     except Exception:
         pass
-    return 0, 1
+    return 0, 4
 
 
 # ── AY BAŞLARI ────────────────────────────────────────────────────────────────
@@ -112,15 +111,16 @@ def _month_starts(index, start, end):
 
 
 # ── ANA BACKTEST ──────────────────────────────────────────────────────────────
-def run_backtest(strategy, stock_data, benchmark_df,
-                 start_capital=100_000, top_n=5):
+def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_n=5):
     """
-    Her ay başında en yüksek puanlı top_n hisseyi al.
+    Her ay başında en yüksek puanlı top_n hisseyi al. Eksik kriter olsa bile 5'e tamamla.
     Döner: pv_df, bm_norm, trades_df, active_now, monthly_table
     """
     bm = benchmark_df['Close'].squeeze()
-    end_date   = pd.Timestamp(bm.index[-1])
+    
+    # Her iki tarafın da net olarak Haziran 2024'ten başlamasını zorluyoruz
     start_date = pd.Timestamp('2024-06-01')
+    end_date   = pd.Timestamp(bm.index[-1])
 
     bm_idx = bm.index[(bm.index >= start_date) & (bm.index <= end_date)]
     if len(bm_idx) < 10:
@@ -131,13 +131,12 @@ def run_backtest(strategy, stock_data, benchmark_df,
         return None, None, None, [], pd.DataFrame()
 
     cash     = float(start_capital)
-    holdings = {}   # ticker → {shares, buy_price, buy_date, score}
+    holdings = {}   
     pv_log   = []
     trades   = []
-    monthly_rows = []   # aylık tablo için
+    monthly_rows = []   
 
     for i, rdate in enumerate(rebal_dates):
-        # Portföy değeri (rebalans öncesi)
         port_val = cash
         for tkr, pos in holdings.items():
             if tkr in stock_data:
@@ -152,35 +151,50 @@ def run_backtest(strategy, stock_data, benchmark_df,
         for tkr, df in stock_data.items():
             if df is None or len(df) < 25: continue
             sc, mx = _score_at(strategy, df, benchmark_df, rdate)
-            if sc == 0: continue
+            
+            # (HATA ÇÖZÜMÜ: if sc == 0: continue kaldırıldı. Böylece eksik kriter olsa bile en iyiler 5'e tamamlanacak)
+            
             c = df['Close'].squeeze()
             bm_c = benchmark_df['Close'].squeeze()
             vd = c.index[c.index <= rdate]
+            
             if len(vd):
                 price = float(c.loc[vd[-1]])
                 c_s   = c.loc[vd]
                 rs_val = _rs_at(c_s, bm_c, rdate, days=20)
                 rs_val = rs_val if (rs_val is not None and not np.isnan(rs_val)) else -999
+                
+                # Temel analiz eşitlik bozucu verileri (df içinde varsa çekilir, yoksa nötr değer atanır)
+                fk_val = float(df['F/K'].iloc[-1]) if 'F/K' in df.columns else 999.0
+                net_kar = float(df['Net_Kar'].iloc[-1]) if 'Net_Kar' in df.columns else 0.0
+
                 candidates.append({
-                    'ticker': tkr, 'score': sc,
-                    'max': mx, 'price': price, 'rs': rs_val
+                    'ticker': tkr, 'score': sc, 'max': mx, 'price': price, 
+                    'rs': rs_val, 'fk': fk_val, 'net_kar': net_kar
                 })
 
-        # Emre stratejisinde RS'e göre, diğerlerinde skora göre sırala
-        if strategy == "emre":
-            candidates.sort(key=lambda x: x['rs'], reverse=True)
-        else:
-            candidates.sort(key=lambda x: (x['score'], x['ticker']), reverse=True)
-        top5 = candidates[:top_n]
+        # Eşitlik Bozucu (Tie-breaker) Mantığı:
+        # 1. Puan (En yüksek)
+        # 2. Net Kar (Varsa en yüksek)
+        # 3. F/K (Varsa en düşük, 0'dan büyük olmak şartıyla)
+        # 4. RS (Rölatif Güç - Temel veri yoksa hayat kurtarır)
+        candidates.sort(key=lambda x: (
+            x['score'], 
+            x['net_kar'], 
+            -x['fk'] if x['fk'] > 0 else -999, 
+            x['rs']
+        ), reverse=True)
+        
+        top5 = candidates[:top_n] # En az 4, en fazla 5 mantığı (5 ile sınırlandı)
         target_tickers = {q['ticker'] for q in top5}
 
-        # Aylık tablo satırı — bu ayın top 5'i
+        # Aylık tablo satırı
         row = {'Ay': rdate.strftime('%b %Y'), 'Port. Değer': port_val}
         for rank, q in enumerate(top5, 1):
             row[f'#{rank}'] = f"{q['ticker'].replace('.IS','')} ({q['score']}/{q['max']})"
         monthly_rows.append(row)
 
-        # Sat: top5'te olmayan holdings
+        # Satış İşlemleri
         for tkr in list(holdings.keys()):
             if tkr not in target_tickers:
                 pos = holdings[tkr]
@@ -201,7 +215,7 @@ def run_backtest(strategy, stock_data, benchmark_df,
                 })
                 del holdings[tkr]
 
-        # Al: top5'te olup holdings'de olmayanlar
+        # Alış İşlemleri
         new_buys = [q for q in top5 if q['ticker'] not in holdings]
         n_total  = len(target_tickers)
         if new_buys and n_total > 0:
@@ -229,7 +243,7 @@ def run_backtest(strategy, stock_data, benchmark_df,
                     'Skor':   f"{q['score']}/{q['max']}",
                 })
 
-    # Son değer + aktif pozisyonlar
+    # Son durum hesaplama
     last_date = bm_idx[-1]
     final_val = cash
     active_now = []
@@ -254,7 +268,6 @@ def run_backtest(strategy, stock_data, benchmark_df,
     pv_df     = pd.DataFrame(pv_log).drop_duplicates('date').set_index('date')
     trades_df = pd.DataFrame(trades) if trades else pd.DataFrame()
 
-    # Aylık tabloya P&L sütunu ekle (ay içi portföy değişimi)
     monthly_df = pd.DataFrame(monthly_rows)
     if len(monthly_df) > 1:
         monthly_df['Aylık P&L'] = monthly_df['Port. Değer'].pct_change() * 100
@@ -265,9 +278,12 @@ def run_backtest(strategy, stock_data, benchmark_df,
             lambda x: f"₺{x:,.0f}"
         )
 
-    # Benchmark normalize
-    bm_s    = bm.loc[bm_idx[0]:last_date]
-    bm_norm = (bm_s / float(bm_s.iloc[0])) * start_capital
+    # Benchmark normalize (Grafik uyumu için tam start_date'den başlatıyoruz)
+    bm_s    = bm.loc[start_date:last_date]
+    if len(bm_s) > 0:
+        bm_norm = (bm_s / float(bm_s.iloc[0])) * start_capital
+    else:
+        bm_norm = None
 
     return pv_df, bm_norm, trades_df, active_now, monthly_df
 
@@ -294,11 +310,13 @@ def calc_stats(pv_df, bm_norm, start_capital):
 
 # ── RENK & LABEL SABİTLERİ ────────────────────────────────────────────────────
 STRAT_COLORS = {
+    'emre':     '#f59e0b', # Emre stratejisini renk haritasına ekledik
     'rs':       '#38bdf8',
     'momentum': '#a78bfa',
     'trend':    '#4ade80',
 }
 STRAT_LABELS = {
+    'emre':     '🟠 Emre Stratejisi',
     'rs':       '🔵 Rölatif Güç',
     'momentum': '🟣 Momentum',
     'trend':    '🟢 Trend Sürücüsü',
@@ -307,10 +325,6 @@ STRAT_LABELS = {
 
 # ── PERFORMANS GRAFİĞİ ────────────────────────────────────────────────────────
 def build_perf_chart(results_map, start_capital):
-    """
-    results_map: { strategy_key: (pv_df, bm_norm) }
-    Üst: kümülatif % · Alt: drawdown %
-    """
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         row_heights=[0.68, 0.32], vertical_spacing=0.04)
 
@@ -345,7 +359,7 @@ def build_perf_chart(results_map, start_capital):
             fig.add_trace(go.Scatter(
                 x=bm_norm.index, y=bm_ret,
                 name='BIST 100',
-                line=dict(color='#f59e0b', width=1.5, dash='dot'),
+                line=dict(color='#ef4444', width=2, dash='dot'), # BIST rengini daha okunur yaptım
                 hovertemplate="BIST100: %{y:+.1f}%<extra></extra>",
             ), row=1, col=1)
             bm_drawn = True
