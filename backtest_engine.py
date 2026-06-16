@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from sectors import get_sector  # Sektör kontrolü için eklendi
 
 
 # ── İNDİKATÖRLER ─────────────────────────────────────────────────────────────
@@ -118,7 +119,6 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
     """
     bm = benchmark_df['Close'].squeeze()
     
-    # Her iki tarafın da net olarak Haziran 2024'ten başlamasını zorluyoruz
     start_date = pd.Timestamp('2024-06-01')
     end_date   = pd.Timestamp(bm.index[-1])
 
@@ -152,8 +152,6 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
             if df is None or len(df) < 25: continue
             sc, mx = _score_at(strategy, df, benchmark_df, rdate)
             
-            # (HATA ÇÖZÜMÜ: if sc == 0: continue kaldırıldı. Böylece eksik kriter olsa bile en iyiler 5'e tamamlanacak)
-            
             c = df['Close'].squeeze()
             bm_c = benchmark_df['Close'].squeeze()
             vd = c.index[c.index <= rdate]
@@ -164,7 +162,6 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
                 rs_val = _rs_at(c_s, bm_c, rdate, days=20)
                 rs_val = rs_val if (rs_val is not None and not np.isnan(rs_val)) else -999
                 
-                # Temel analiz eşitlik bozucu verileri (df içinde varsa çekilir, yoksa nötr değer atanır)
                 fk_val = float(df['F/K'].iloc[-1]) if 'F/K' in df.columns else 999.0
                 net_kar = float(df['Net_Kar'].iloc[-1]) if 'Net_Kar' in df.columns else 0.0
 
@@ -173,11 +170,7 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
                     'rs': rs_val, 'fk': fk_val, 'net_kar': net_kar
                 })
 
-        # Eşitlik Bozucu (Tie-breaker) Mantığı:
-        # 1. Puan (En yüksek)
-        # 2. Net Kar (Varsa en yüksek)
-        # 3. F/K (Varsa en düşük, 0'dan büyük olmak şartıyla)
-        # 4. RS (Rölatif Güç - Temel veri yoksa hayat kurtarır)
+        # Eşitlik Bozucu
         candidates.sort(key=lambda x: (
             x['score'], 
             x['net_kar'], 
@@ -185,16 +178,27 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
             x['rs']
         ), reverse=True)
         
-        top5 = candidates[:top_n] # En az 4, en fazla 5 mantığı (5 ile sınırlandı)
+        # Max 2 Hisse / Sektör Filtresi
+        if strategy == "emre":
+            top5 = []
+            sector_counts = {}
+            for cand in candidates:
+                sect = get_sector(cand['ticker'])
+                if sector_counts.get(sect, 0) < 2:
+                    top5.append(cand)
+                    sector_counts[sect] = sector_counts.get(sect, 0) + 1
+                if len(top5) == top_n:
+                    break
+        else:
+            top5 = candidates[:top_n]
+
         target_tickers = {q['ticker'] for q in top5}
 
-        # Aylık tablo satırı
         row = {'Ay': rdate.strftime('%b %Y'), 'Port. Değer': port_val}
         for rank, q in enumerate(top5, 1):
             row[f'#{rank}'] = f"{q['ticker'].replace('.IS','')} ({q['score']}/{q['max']})"
         monthly_rows.append(row)
 
-        # Satış İşlemleri
         for tkr in list(holdings.keys()):
             if tkr not in target_tickers:
                 pos = holdings[tkr]
@@ -215,7 +219,6 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
                 })
                 del holdings[tkr]
 
-        # Alış İşlemleri
         new_buys = [q for q in top5 if q['ticker'] not in holdings]
         n_total  = len(target_tickers)
         if new_buys and n_total > 0:
@@ -243,7 +246,6 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
                     'Skor':   f"{q['score']}/{q['max']}",
                 })
 
-    # Son durum hesaplama
     last_date = bm_idx[-1]
     final_val = cash
     active_now = []
@@ -278,7 +280,6 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
             lambda x: f"₺{x:,.0f}"
         )
 
-    # Benchmark normalize (Grafik uyumu için tam start_date'den başlatıyoruz)
     bm_s    = bm.loc[start_date:last_date]
     if len(bm_s) > 0:
         bm_norm = (bm_s / float(bm_s.iloc[0])) * start_capital
@@ -310,7 +311,7 @@ def calc_stats(pv_df, bm_norm, start_capital):
 
 # ── RENK & LABEL SABİTLERİ ────────────────────────────────────────────────────
 STRAT_COLORS = {
-    'emre':     '#f59e0b', # Emre stratejisini renk haritasına ekledik
+    'emre':     '#f59e0b', 
     'rs':       '#38bdf8',
     'momentum': '#a78bfa',
     'trend':    '#4ade80',
@@ -359,7 +360,7 @@ def build_perf_chart(results_map, start_capital):
             fig.add_trace(go.Scatter(
                 x=bm_norm.index, y=bm_ret,
                 name='BIST 100',
-                line=dict(color='#ef4444', width=2, dash='dot'), # BIST rengini daha okunur yaptım
+                line=dict(color='#ef4444', width=2, dash='dot'), 
                 hovertemplate="BIST100: %{y:+.1f}%<extra></extra>",
             ), row=1, col=1)
             bm_drawn = True
