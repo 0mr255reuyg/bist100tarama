@@ -120,7 +120,7 @@ def run_backtest(strategy, stock_data, benchmark_df,
     """
     bm = benchmark_df['Close'].squeeze()
     end_date   = pd.Timestamp(bm.index[-1])
-    start_date = end_date - pd.DateOffset(years=2)
+    start_date = pd.Timestamp('2024-06-01')
 
     bm_idx = bm.index[(bm.index >= start_date) & (bm.index <= end_date)]
     if len(bm_idx) < 10:
