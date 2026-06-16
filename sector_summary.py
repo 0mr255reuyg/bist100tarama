@@ -9,33 +9,36 @@ import plotly.graph_objects as go
 from sectors import SECTOR_MAP
 
 def _sector_returns(stock_data):
-    """
-    Her hisse için 1g, 5g, 21g getiri hesapla.
-    Sektör bazında ağırlıksız ortalama al.
-    Returns: DataFrame(sektör, ret_1d, ret_5d, ret_21d, mom_5d, mom_21d)
-    """
+    # 1. Ortak en güncel tarihi bul (Zaman kaymasını / yfinance bug'ını önlemek için)
+    valid_dfs = [df for df in stock_data.values() if df is not None and not df.empty]
+    if not valid_dfs: return pd.DataFrame()
+    
+    # En çok tekrar eden "son işlem gününü" referans al
+    last_dates = [df.index[-1] for df in valid_dfs]
+    common_last_date = pd.Series(last_dates).mode()[0]
+
     rows = []
     for ticker, df in stock_data.items():
-        if df is None or len(df) < 25: continue
+        if df is None or len(df) < 45: continue
         try:
-            tkr  = ticker.replace(".IS","")
-            sect = SECTOR_MAP.get(tkr, "Diğer")
-            c    = df['Close'].squeeze()
-
-            # Sıfıra bölünme hatasını engellemek için güvenlik kontrolleri
-            if float(c.iloc[-2]) == 0 or float(c.iloc[-6]) == 0 or float(c.iloc[-22]) == 0:
+            # 2. Veriyi ortak güne kadar kes (Elmalarla armutlar karışmasın)
+            c = df['Close'].loc[:common_last_date].dropna()
+            
+            # Eğer hissenin o gün verisi yoksa veya eksikse, hesaplamaya katma
+            if len(c) < 25 or c.index[-1] != common_last_date:
                 continue
 
-            ret_1d  = float(c.iloc[-1] / c.iloc[-2]  - 1) * 100 if len(c) >= 2  else np.nan
-            ret_5d  = float(c.iloc[-1] / c.iloc[-6]  - 1) * 100 if len(c) >= 6  else np.nan
-            ret_21d = float(c.iloc[-1] / c.iloc[-22] - 1) * 100 if len(c) >= 22 else np.nan
+            tkr  = ticker.replace(".IS","")
+            sect = SECTOR_MAP.get(tkr, "Diğer")
 
-            # İvme: son 5g getiri - önceki 5g getiri (momentum kırılımı)
-            mom_5d_prev = (float(c.iloc[-6] / c.iloc[-11] - 1)*100) if len(c) >= 11 and float(c.iloc[-11]) != 0 else 0
+            ret_1d  = float(c.iloc[-1] / c.iloc[-2]  - 1) * 100
+            ret_5d  = float(c.iloc[-1] / c.iloc[-6]  - 1) * 100
+            ret_21d = float(c.iloc[-1] / c.iloc[-22] - 1) * 100
+
+            mom_5d_prev = (float(c.iloc[-6] / c.iloc[-11] - 1)*100) if float(c.iloc[-11]) != 0 else 0
             mom_5d  = ret_5d - mom_5d_prev
 
-            # Yavaşlama: son 21g getiri - önceki 21g getiri
-            mom_21d_prev = (float(c.iloc[-22] / c.iloc[-43] - 1)*100) if len(c) >= 43 and float(c.iloc[-43]) != 0 else 0
+            mom_21d_prev = (float(c.iloc[-22] / c.iloc[-43] - 1)*100) if float(c.iloc[-43]) != 0 else 0
             mom_21d = ret_21d - mom_21d_prev
 
             rows.append({
@@ -51,7 +54,7 @@ def _sector_returns(stock_data):
 
     df_all = pd.DataFrame(rows)
     
-    # Sektörlere göre grupla ve ortalamaları al
+    # Sektörlere göre topla ve hisse sayısına böl (mean)
     sect_df = df_all.groupby('sector').agg(
         ret_1d=('ret_1d','mean'),
         ret_5d=('ret_5d','mean'),
@@ -65,17 +68,12 @@ def _sector_returns(stock_data):
 
 
 def build_summary(stock_data):
-    """
-    Returns dict of category → list of (sektor, deger_str)
-    """
     df = _sector_returns(stock_data)
     if df.empty:
         return {}
 
-    # NaN değerlerin sıralamayı bozmasını engellemek için dropna kullanıyoruz
     df_clean = df.dropna(subset=['ret_1d', 'ret_5d', 'ret_21d', 'mom_5d'])
 
-    # Sırala ve En İyi / En Kötü 3'leri Çek
     top_1d   = df_clean.nlargest(3, 'ret_1d')[['sector','ret_1d']].values.tolist()
     bot_1d   = df_clean.nsmallest(3, 'ret_1d')[['sector','ret_1d']].values.tolist()
     
@@ -88,7 +86,6 @@ def build_summary(stock_data):
     ivme     = df_clean.nlargest(3, 'mom_5d')[['sector','mom_5d']].values.tolist()
     yavas    = df_clean.nsmallest(3, 'mom_5d')[['sector','mom_5d']].values.tolist()
     
-    # Toparlayan: 1 Haftalık pozitif, 1 Aylık negatif olanlar arasından en iyi sıçramayı yapanlar
     toparlayan = df_clean[(df_clean['ret_5d'] > 0) & (df_clean['ret_21d'] < 0)].nlargest(3,'ret_5d')[['sector','ret_5d']].values.tolist()
 
     def fmt(val): return f"{val:+.2f}%"
@@ -107,11 +104,9 @@ def build_summary(stock_data):
 
 
 def build_sector_bar_chart(stock_data):
-    """Sektörlerin 1g/5g/21g getirilerini bar chart olarak göster"""
     df = _sector_returns(stock_data)
     if df.empty: return None
 
-    # Grafik görünümünü güzelleştirmek için bugünkü getiriye göre küçükten büyüğe diziyoruz
     df = df.dropna(subset=['ret_1d']).sort_values('ret_1d', ascending=True)
 
     fig = go.Figure()
@@ -133,7 +128,7 @@ def build_sector_bar_chart(stock_data):
     ))
 
     fig.update_layout(
-        height=max(450, len(df) * 30), # Uzun sektör isimlerinin sıkışmaması için yüksekliği artırdık
+        height=max(450, len(df) * 30), 
         paper_bgcolor='#0d0f14', plot_bgcolor='#0d0f14',
         font=dict(family='JetBrains Mono', color='#94a3b8', size=11),
         legend=dict(orientation='h', y=1.02, x=0, bgcolor='rgba(0,0,0,0)'),
