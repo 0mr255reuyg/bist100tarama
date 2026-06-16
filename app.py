@@ -372,7 +372,7 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.caption("🟡 Emre: Puan ve RS Değerine Göre En İyi 5 Hisseyi Getirir")
+    st.caption("🟡 Emre: Puan ve RS Değerine Göre En İyi 5 Hisseyi Getirir (Sektör Max 2)")
     st.caption("🟣 Momentum: SMA50 · MACD artan · ATR genişleme · Hacim")
 
 # ── STRATEJI BUTONLARI ───────────────────────────────────────────
@@ -682,7 +682,6 @@ if not st.session_state.scan_done:
         stock_data = fetch_data(BIST100_YF, period, interval)
 
     if strategy == "emre":
-        # Katı filtrelemeyi kaldırdık, her koşulda en iyi 5 hisseyi bulacak
         results = []
         for ticker, df in stock_data.items():
             if df is None or len(df)<22: continue
@@ -701,12 +700,20 @@ if not st.session_state.scan_done:
             except Exception:
                 pass
                 
-        # Önce Puana, Puanlar eşitse RS (Rölatif Güç) değerine göre en iyiden kötüye sırala
+        # Önce Puana, Puanlar eşitse RS değerine göre en iyiden kötüye sırala
         results.sort(key=lambda x: (x['score'], x['rs']), reverse=True)
         
-        # En üstteki 5 hisseyi garantili olarak al
-        for r in results[:5]: 
-            r['in_top5'] = True
+        # Sektör Max 2 kuralı ile ilk 5'i garantile
+        top5_count = 0
+        sector_counts = {}
+        for r in results:
+            sect = r['sector']
+            if top5_count < 5 and sector_counts.get(sect, 0) < 2:
+                r['in_top5'] = True
+                sector_counts[sect] = sector_counts.get(sect, 0) + 1
+                top5_count += 1
+            else:
+                r['in_top5'] = False
 
     else:
         results = []
