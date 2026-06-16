@@ -439,15 +439,15 @@ if st.session_state.page == "sektor":
 
     summary = build_summary(stock_s)
     CAT_STYLE = {
-        "🚀 BUGÜN LİDER":   ("#14532d","#22c55e"),
-        "⚡ İVME KAZANAN":  ("#14532d","#4ade80"),
-        "📈 1 HAFTA ZİRVE": ("#14532d","#86efac"),
-        "🏆 1 AY ZİRVE":    ("#14532d","#bbf7d0"),
-        "🔄 TOPARLAYAN":    ("#1c3a1c","#a3e635"),
-        "📉 BUGÜN GERİDE":  ("#4c0519","#ef4444"),
-        "❄️ 1 HAFTA DİP":  ("#4c0519","#f87171"),
-        "🪨 1 AY DİP":      ("#4c0519","#fca5a5"),
-        "🐌 YAVAŞLAYAN":    ("#2c1810","#fb923c"),
+        "🚀 SON KAPANIŞ LİDERİ":  ("#14532d","#22c55e"),
+        "⚡ İVME KAZANAN":        ("#14532d","#4ade80"),
+        "📈 1 HAFTA ZİRVE":       ("#14532d","#86efac"),
+        "🏆 1 AY ZİRVE":          ("#14532d","#bbf7d0"),
+        "🔄 TOPARLAYAN":          ("#1c3a1c","#a3e635"),
+        "📉 SON KAPANIŞTA GERİDE":("#4c0519","#ef4444"),
+        "❄️ 1 HAFTA DİP":        ("#4c0519","#f87171"),
+        "🪨 1 AY DİP":            ("#4c0519","#fca5a5"),
+        "🐌 YAVAŞLAYAN":          ("#2c1810","#fb923c"),
     }
     def cat_card(title, items, bg, border):
         rows=""
@@ -465,9 +465,9 @@ if st.session_state.page == "sektor":
 
     st.markdown("### 📰 Günün Manşetleri")
     rows_layout = [
-        ["🚀 BUGÜN LİDER","⚡ İVME KAZANAN"],
+        ["🚀 SON KAPANIŞ LİDERİ","⚡ İVME KAZANAN"],
         ["📈 1 HAFTA ZİRVE","🏆 1 AY ZİRVE"],
-        ["🔄 TOPARLAYAN","📉 BUGÜN GERİDE"],
+        ["🔄 TOPARLAYAN","📉 SON KAPANIŞTA GERİDE"],
         ["❄️ 1 HAFTA DİP","🪨 1 AY DİP"],
         ["🐌 YAVAŞLAYAN",None],
     ]
@@ -488,15 +488,15 @@ if st.session_state.page == "sektor":
     full_df = _sector_returns(stock_s)
     if not full_df.empty:
         full_df = full_df.sort_values('ret_1d',ascending=False).reset_index(drop=True)
-        full_df.columns=['Sektör','Bugün %','1 Hafta %','1 Ay %','İvme (5g)','İvme (21g)','Hisse Sayısı']
-        for col_name in ['Bugün %','1 Hafta %','1 Ay %']:
+        full_df.columns=['Sektör','Son Kapanış %','1 Hafta %','1 Ay %','İvme (5g)','İvme (21g)','Hisse Sayısı']
+        for col_name in ['Son Kapanış %','1 Hafta %','1 Ay %']:
             full_df[col_name] = full_df[col_name].apply(
                 lambda x: f"{x:+.2f}%" if not np.isnan(x) else "N/A")
         def color_ret(val):
             if isinstance(val,str) and val.startswith('+'): return 'color:#22c55e'
             if isinstance(val,str) and val.startswith('-'): return 'color:#ef4444'
             return ''
-        st.dataframe(full_df.style.map(color_ret,subset=['Bugün %','1 Hafta %','1 Ay %']),
+        st.dataframe(full_df.style.map(color_ret,subset=['Son Kapanış %','1 Hafta %','1 Ay %']),
                      use_container_width=True, height=500)
     st.stop()
 
