@@ -12,7 +12,7 @@ def _sector_returns(stock_data):
     """
     Her hisse için 1g, 5g, 21g getiri hesapla.
     Sektör bazında ağırlıksız ortalama al.
-    Returns: DataFrame(sektör, ret_1d, ret_5d, ret_21d, momentum_5d, momentum_21d)
+    Returns: DataFrame(sektör, ret_1d, ret_5d, ret_21d, mom_5d, mom_21d)
     """
     rows = []
     for ticker, df in stock_data.items():
@@ -22,14 +22,21 @@ def _sector_returns(stock_data):
             sect = SECTOR_MAP.get(tkr, "Diğer")
             c    = df['Close'].squeeze()
 
+            # Sıfıra bölünme hatasını engellemek için güvenlik kontrolleri
+            if float(c.iloc[-2]) == 0 or float(c.iloc[-6]) == 0 or float(c.iloc[-22]) == 0:
+                continue
+
             ret_1d  = float(c.iloc[-1] / c.iloc[-2]  - 1) * 100 if len(c) >= 2  else np.nan
             ret_5d  = float(c.iloc[-1] / c.iloc[-6]  - 1) * 100 if len(c) >= 6  else np.nan
             ret_21d = float(c.iloc[-1] / c.iloc[-22] - 1) * 100 if len(c) >= 22 else np.nan
 
             # İvme: son 5g getiri - önceki 5g getiri (momentum kırılımı)
-            mom_5d  = ret_5d - (float(c.iloc[-6] / c.iloc[-11] - 1)*100 if len(c) >= 11 else 0)
-            # Yavaşlama: son 5g getiri - önceki 5g getiri negatifse
-            mom_21d = ret_21d - (float(c.iloc[-22] / c.iloc[-43] - 1)*100 if len(c) >= 43 else 0)
+            mom_5d_prev = (float(c.iloc[-6] / c.iloc[-11] - 1)*100) if len(c) >= 11 and float(c.iloc[-11]) != 0 else 0
+            mom_5d  = ret_5d - mom_5d_prev
+
+            # Yavaşlama: son 21g getiri - önceki 21g getiri
+            mom_21d_prev = (float(c.iloc[-22] / c.iloc[-43] - 1)*100) if len(c) >= 43 and float(c.iloc[-43]) != 0 else 0
+            mom_21d = ret_21d - mom_21d_prev
 
             rows.append({
                 'ticker': tkr, 'sector': sect,
@@ -43,6 +50,8 @@ def _sector_returns(stock_data):
         return pd.DataFrame()
 
     df_all = pd.DataFrame(rows)
+    
+    # Sektörlere göre grupla ve ortalamaları al
     sect_df = df_all.groupby('sector').agg(
         ret_1d=('ret_1d','mean'),
         ret_5d=('ret_5d','mean'),
@@ -63,16 +72,24 @@ def build_summary(stock_data):
     if df.empty:
         return {}
 
-    # Sırala
-    top_1d   = df.nlargest(3, 'ret_1d')[['sector','ret_1d']].values.tolist()
-    bot_1d   = df.nsmallest(3, 'ret_1d')[['sector','ret_1d']].values.tolist()
-    top_5d   = df.nlargest(3, 'ret_5d')[['sector','ret_5d']].values.tolist()
-    bot_5d   = df.nsmallest(3, 'ret_5d')[['sector','ret_5d']].values.tolist()
-    top_21d  = df.nlargest(3, 'ret_21d')[['sector','ret_21d']].values.tolist()
-    bot_21d  = df.nsmallest(3, 'ret_21d')[['sector','ret_21d']].values.tolist()
-    ivme     = df.nlargest(3, 'mom_5d')[['sector','mom_5d']].values.tolist()
-    yavas    = df.nsmallest(3, 'mom_5d')[['sector','mom_5d']].values.tolist()
-    toparlayan = df[(df['ret_5d'] > 0) & (df['ret_21d'] < 0)].nlargest(3,'ret_5d')[['sector','ret_5d']].values.tolist()
+    # NaN değerlerin sıralamayı bozmasını engellemek için dropna kullanıyoruz
+    df_clean = df.dropna(subset=['ret_1d', 'ret_5d', 'ret_21d', 'mom_5d'])
+
+    # Sırala ve En İyi / En Kötü 3'leri Çek
+    top_1d   = df_clean.nlargest(3, 'ret_1d')[['sector','ret_1d']].values.tolist()
+    bot_1d   = df_clean.nsmallest(3, 'ret_1d')[['sector','ret_1d']].values.tolist()
+    
+    top_5d   = df_clean.nlargest(3, 'ret_5d')[['sector','ret_5d']].values.tolist()
+    bot_5d   = df_clean.nsmallest(3, 'ret_5d')[['sector','ret_5d']].values.tolist()
+    
+    top_21d  = df_clean.nlargest(3, 'ret_21d')[['sector','ret_21d']].values.tolist()
+    bot_21d  = df_clean.nsmallest(3, 'ret_21d')[['sector','ret_21d']].values.tolist()
+    
+    ivme     = df_clean.nlargest(3, 'mom_5d')[['sector','mom_5d']].values.tolist()
+    yavas    = df_clean.nsmallest(3, 'mom_5d')[['sector','mom_5d']].values.tolist()
+    
+    # Toparlayan: 1 Haftalık pozitif, 1 Aylık negatif olanlar arasından en iyi sıçramayı yapanlar
+    toparlayan = df_clean[(df_clean['ret_5d'] > 0) & (df_clean['ret_21d'] < 0)].nlargest(3,'ret_5d')[['sector','ret_5d']].values.tolist()
 
     def fmt(val): return f"{val:+.2f}%"
 
@@ -94,7 +111,8 @@ def build_sector_bar_chart(stock_data):
     df = _sector_returns(stock_data)
     if df.empty: return None
 
-    df = df.sort_values('ret_1d', ascending=True)
+    # Grafik görünümünü güzelleştirmek için bugünkü getiriye göre küçükten büyüğe diziyoruz
+    df = df.dropna(subset=['ret_1d']).sort_values('ret_1d', ascending=True)
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -115,7 +133,7 @@ def build_sector_bar_chart(stock_data):
     ))
 
     fig.update_layout(
-        height=max(350, len(df) * 28),
+        height=max(450, len(df) * 30), # Uzun sektör isimlerinin sıkışmaması için yüksekliği artırdık
         paper_bgcolor='#0d0f14', plot_bgcolor='#0d0f14',
         font=dict(family='JetBrains Mono', color='#94a3b8', size=11),
         legend=dict(orientation='h', y=1.02, x=0, bgcolor='rgba(0,0,0,0)'),
