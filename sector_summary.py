@@ -15,10 +15,10 @@ def _sector_returns(stock_data):
             tkr = ticker.replace(".IS","")
             sect = SECTOR_MAP.get(tkr, "Diğer")
 
-            # Kaymasız net yüzde getiri hesaplamaları revize edildi
             ret_1d = float(df_sorted['Close'].pct_change(1).iloc[-1] * 100)
             ret_5d = float(df_sorted['Close'].pct_change(5).iloc[-1] * 100) if len(df_sorted) >= 6 else np.nan
             ret_21d = float(df_sorted['Close'].pct_change(21).iloc[-1] * 100) if len(df_sorted) >= 22 else np.nan
+
             mom_5d = float(df_sorted['Close'].pct_change(5).iloc[-1] - df_sorted['Close'].pct_change(5).iloc[-6]) if len(df_sorted) >= 11 else 0
 
             rows.append({
