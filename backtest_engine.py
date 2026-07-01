@@ -41,9 +41,7 @@ def _rs_at(c_s, bm, date, days=20):
     br = (float(bm_s.iloc[-1]) / float(bm_s.iloc[-days])) - 1
     return sr - br
 
-# ── GEÇMİŞ TARİH İÇİN MAKRO REJİM SİMÜLASYONU ─────────────────────────────────
 def _get_historical_macro_sectors(date):
-    # Backtest esnasında geçmiş aylardaki faiz rejim sektörlerini simüle eder
     np.random.seed(int(date.strftime('%Y%m%d')) % 100)
     regimes = [
         ["Gıda ve Perakende", "Sigorta", "Sağlık", "İletişim"],
@@ -52,56 +50,28 @@ def _get_historical_macro_sectors(date):
     ]
     return regimes[np.random.choice([0, 1, 2])]
 
-# ── KRİTER SKORU ──────────────────────────────────────────────────────────────
 def _score_at(strategy, df, bm_df, date, ticker):
     try:
-        c  = df['Close'].squeeze()
-        h  = df['High'].squeeze()
-        lo = df['Low'].squeeze()
-        v  = df['Volume'].squeeze()
+        c  = df['Close'].squeeze(); h  = df['High'].squeeze(); lo = df['Low'].squeeze(); v  = df['Volume'].squeeze()
         bm = bm_df['Close'].squeeze()
-
         valid = c.index[c.index <= date]
-        if len(valid) < 55: return 0, 5 # Max skor 5
+        if len(valid) < 55: return 0, 5
         c_s  = c.loc[valid]; h_s = h.loc[valid]; lo_s = lo.loc[valid]; v_s = v.loc[valid]
         price = float(c_s.iloc[-1])
-
-        s20   = float(_sma(c_s, 20).iloc[-1])
-        s50   = float(_sma(c_s, 50).iloc[-1])
-        rsi_v = float(_rsi(c_s).iloc[-1])
-        rs    = _rs_at(c_s, bm, date, days=20)
-        vr    = _vol_ratio_at(v_s, 20)
+        s20 = float(_sma(c_s, 20).iloc[-1]); s50 = float(_sma(c_s, 50).iloc[-1])
+        rsi_v = float(_rsi(c_s).iloc[-1]); rs = _rs_at(c_s, bm, date, days=20); vr = _vol_ratio_at(v_s, 20)
 
         if strategy == "emre":
-            checks = [
-                (rs is not None) and (not np.isnan(rs)) and rs > 0,
-                price > s20 and price > s50,
-                (not np.isnan(vr)) and vr >= 0.9,
-                (not np.isnan(rsi_v)) and rsi_v < 80,
-            ]
-            score = sum(checks)
-            max_score = 4
-            
-            # Makro Sektör Filtresi
-            allowed_sectors = _get_historical_macro_sectors(date)
-            is_ok = get_sector(ticker) in allowed_sectors
-            if is_ok: score += 1
+            checks = [(rs is not None) and (not np.isnan(rs)) and rs > 0, price > s20 and price > s50, (not np.isnan(vr)) and vr >= 0.9, (not np.isnan(rsi_v)) and rsi_v < 80]
+            score = sum(checks); max_score = 4
+            if get_sector(ticker) in _get_historical_macro_sectors(date): score += 1
             max_score += 1
-                
             return score, max_score
-
         elif strategy == "momentum":
             _, _, hl = _macd(c_s)
-            hn = float(hl.iloc[-1]); hp = float(hl.iloc[-2])
-            a14 = _atr(h_s, lo_s, c_s)
-            atr_now = float(a14.iloc[-1])
-            atr_avg = float(a14.rolling(60).mean().iloc[-1])
-            checks = [
-                price > s50,
-                hn > 0 and hn > hp,
-                (not np.isnan(atr_avg)) and atr_now > atr_avg,
-                (not np.isnan(vr)) and vr > 1.2,
-            ]
+            hn = float(hl.iloc[-1]); hp = float(hl.iloc[-2]); a14 = _atr(h_s, lo_s, c_s)
+            atr_now = float(a14.iloc[-1]); atr_avg = float(a14.rolling(60).mean().iloc[-1])
+            checks = [price > s50, hn > 0 and hn > hp, (not np.isnan(atr_avg)) and atr_now > atr_avg, (not np.isnan(vr)) and vr > 1.2]
             return sum(checks), 4
     except Exception: pass
     return 0, 4
@@ -111,7 +81,7 @@ def _month_starts(index, start, end):
     df_tmp = pd.DataFrame({'d': dates, 'ym': [x.strftime('%Y-%m') for x in dates]})
     return list(df_tmp.groupby('ym')['d'].first())
 
-# ── ANA BACKTEST MOTORU (EŞİT AĞIRLIKLI REBALANS İLE) ─────────────────────────
+# ── ANA BACKTEST MOTORU (TÜM İŞLEMLERİN LOGLANMASI EKLENDİ) ───────────────────
 def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_n=5):
     bm = benchmark_df['Close'].squeeze()
     start_date = pd.Timestamp('2024-06-01')
@@ -129,7 +99,7 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
         port_val = cash
         current_prices = {}
         
-        # 1. Mevcut portföyün o günkü güncel değerini hesapla
+        # 1. Mevcut portföyün değerini hesapla
         for tkr, pos in holdings.items():
             if tkr in stock_data:
                 c = stock_data[tkr]['Close'].squeeze()
@@ -139,17 +109,15 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
                 port_val += pos['shares'] * p
         pv_log.append({'date': rdate, 'value': port_val})
 
-        # 2. Yeni Ay İçin Tarama Yap
+        # 2. Yeni Ay İçin Tarama
         candidates = []
         for tkr, df in stock_data.items():
             if df is None or len(df) < 25: continue
             sc, mx = _score_at(strategy, df, benchmark_df, rdate, tkr)
             c = df['Close'].squeeze(); vd = c.index[c.index <= rdate]
             if len(vd):
-                price = float(c.loc[vd[-1]])
-                rs_val = _rs_at(c.loc[vd], benchmark_df['Close'].squeeze(), rdate, days=20)
-                rs_val = rs_val if (rs_val is not None and not np.isnan(rs_val)) else -999
-                candidates.append({'ticker': tkr, 'score': sc, 'max': mx, 'price': price, 'rs': rs_val})
+                rs_val = _rs_at(c.loc[vd], bm, rdate, days=20)
+                candidates.append({'ticker': tkr, 'score': sc, 'max': mx, 'price': float(c.loc[vd[-1]]), 'rs': rs_val if rs_val and not np.isnan(rs_val) else -999})
 
         candidates.sort(key=lambda x: (x['score'], x['rs']), reverse=True)
         
@@ -158,79 +126,87 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
             sect = get_sector(cand['ticker'])
             if strategy == "emre":
                 if sector_counts.get(sect, 0) < 2:
-                    top5.append(cand)
-                    sector_counts[sect] = sector_counts.get(sect, 0) + 1
+                    top5.append(cand); sector_counts[sect] = sector_counts.get(sect, 0) + 1
             else:
                 top5.append(cand)
             if len(top5) == top_n: break
 
         target_tickers = {q['ticker']: q for q in top5}
-        
-        # Aylık Özeti Kaydet
-        row = {'Ay': rdate.strftime('%b %Y'), 'Port. Değer': port_val}
-        for rank, q in enumerate(top5, 1):
-            row[f'#{rank}'] = f"{q['ticker'].replace('.IS','')} ({q['score']}/{q['max']})"
-        monthly_rows.append(row)
-
-        # 3. Kümülatif Eşit Dağılım Hesaplaması (Örn: 150.000 / 5 = 30.000 ₺)
         alloc_per_stock = port_val / len(top5) if top5 else 0
 
-        # Portföyden Çıkanları Sat
+        row = {'Ay': rdate.strftime('%b %Y'), 'Portföy Büyüklüğü': port_val}
+        for rank, q in enumerate(top5, 1): row[f'#{rank}'] = f"{q['ticker'].replace('.IS','')} ({q['score']}/{q['max']})"
+        monthly_rows.append(row)
+
+        # 3. İŞLEMLER: Satış, Kâr Al, Ekleme ve Yeni Alış
+        # 3A. Tamamen Çıkanları Sat
         for tkr in list(holdings.keys()):
             if tkr not in target_tickers:
                 pos = holdings[tkr]
                 sell_p = current_prices.get(tkr, pos['buy_price'])
                 pnl = (sell_p / pos['buy_price'] - 1) * 100
-                cash += pos['shares'] * sell_p
-                trades.append({'Ay': rdate.strftime('%b %Y'), 'Hisse': tkr.replace('.IS',''), 'İşlem': 'SATIŞ', 'Alış ₺': f"{pos['buy_price']:.2f}", 'Satış ₺': f"{sell_p:.2f}", 'P&L': f"{pnl:+.1f}%", 'Süre': f"{(rdate - pos['buy_date']).days} gün", 'Skor': f"{pos['score']}/{pos['max']}"})
+                val = pos['shares'] * sell_p
+                cash += val
+                trades.append({'Ay': rdate.strftime('%b %Y'), 'Hisse': tkr.replace('.IS',''), 'İşlem Türü': '🔴 SATIŞ (Çıkış)', 'İşlem Hacmi ₺': f"{val:.2f}", 'Fiyat ₺': f"{sell_p:.2f}", 'Anlık Net K/Z': f"{pnl:+.1f}%"})
                 del holdings[tkr]
 
-        # Kalanları Dengele (Rebalans) ve Yenileri Al
+        # 3B. Kalanları Dengele (Rebalans) ve Yenileri Al
         for tkr, q in target_tickers.items():
             if tkr in holdings:
-                # Hisse devam ediyorsa lot miktarını yeni eşit hedef değere (alloc_per_stock) göre ayarla
                 pos = holdings[tkr]
-                current_value = pos['shares'] * current_prices[tkr]
-                holdings[tkr]['shares'] = alloc_per_stock / current_prices[tkr]
-                cash += (current_value - alloc_per_stock) # Fazlalığı nakite dön veya nakitten ekle
+                curr_p = current_prices[tkr]
+                curr_val = pos['shares'] * curr_p
+                diff = curr_val - alloc_per_stock
+                pnl_now = (curr_p / pos['buy_price'] - 1) * 100
+                
+                # Eşitleme için al-sat (50 TL üzeri sapmaları düzeltir)
+                if abs(diff) > 50:
+                    action = '🟠 KÂR AL (Azalt)' if diff > 0 else '🔵 EKLEME (Artır)'
+                    trade_amt = abs(diff)
+                    cash += diff
+                    
+                    # Ortalama Maliyet Güncellemesi (Eğer ekleme yapıyorsak ortalama maliyet değişir)
+                    if diff < 0: # Ekleme yapıldı
+                        total_shares = alloc_per_stock / curr_p
+                        new_avg_cost = (pos['shares'] * pos['buy_price'] + trade_amt) / total_shares
+                        holdings[tkr]['buy_price'] = new_avg_cost
+                    
+                    holdings[tkr]['shares'] = alloc_per_stock / curr_p
+                    trades.append({'Ay': rdate.strftime('%b %Y'), 'Hisse': tkr.replace('.IS',''), 'İşlem Türü': action, 'İşlem Hacmi ₺': f"{trade_amt:.2f}", 'Fiyat ₺': f"{curr_p:.2f}", 'Anlık Net K/Z': f"{pnl_now:+.1f}%"})
             else:
-                # Yeni Hisse Alımı
+                # Yeni Hisse
                 if q['price'] > 0:
                     holdings[tkr] = {'shares': alloc_per_stock / q['price'], 'buy_price': q['price'], 'buy_date': rdate, 'score': q['score'], 'max': q['max']}
                     cash -= alloc_per_stock
-                    trades.append({'Ay': rdate.strftime('%b %Y'), 'Hisse': tkr.replace('.IS',''), 'İşlem': 'ALIŞ', 'Alış ₺': f"{q['price']:.2f}", 'Satış ₺': '-', 'P&L': '-', 'Süre': '-', 'Skor': f"{q['score']}/{q['max']}"})
+                    trades.append({'Ay': rdate.strftime('%b %Y'), 'Hisse': tkr.replace('.IS',''), 'İşlem Türü': '🟢 ALIŞ (Giriş)', 'İşlem Hacmi ₺': f"{alloc_per_stock:.2f}", 'Fiyat ₺': f"{q['price']:.2f}", 'Anlık Net K/Z': '-'})
 
-    # Son Gün Hesaplaması
+    # Son Gün Portföy Durumu
     last_date = bm_idx[-1]; final_val = cash; active_now = []
     for tkr, pos in holdings.items():
         if tkr in stock_data:
             c = stock_data[tkr]['Close'].squeeze(); vd = c.index[c.index <= last_date]
             cur_p = float(c.loc[vd[-1]]) if len(vd) else pos['buy_price']
             final_val += pos['shares'] * cur_p
-            active_now.append({'ticker': tkr.replace('.IS',''), 'buy_date': pos['buy_date'].strftime('%d.%m.%Y'), 'buy_price': pos['buy_price'], 'current_price': cur_p, 'pnl_pct': (cur_p / pos['buy_price'] - 1) * 100, 'score': pos['score'], 'max': pos['max']})
+            active_now.append({'ticker': tkr.replace('.IS',''), 'buy_date': pos['buy_date'].strftime('%d.%m.%Y'), 'buy_price': pos['buy_price'], 'current_price': cur_p, 'pnl_pct': (cur_p / pos['buy_price'] - 1) * 100})
     pv_log.append({'date': last_date, 'value': final_val})
 
     pv_df = pd.DataFrame(pv_log).drop_duplicates('date').set_index('date')
     trades_df = pd.DataFrame(trades) if trades else pd.DataFrame()
     monthly_df = pd.DataFrame(monthly_rows)
     if len(monthly_df) > 1:
-        monthly_df['Aylık P&L'] = monthly_df['Port. Değer'].pct_change() * 100
-        monthly_df['Aylık P&L'] = monthly_df['Aylık P&L'].apply(lambda x: f"{x:+.1f}%" if not pd.isna(x) else '-')
-        monthly_df['Port. Değer'] = monthly_df['Port. Değer'].apply(lambda x: f"₺{x:,.0f}")
+        monthly_df['Aylık Değişim %'] = monthly_df['Portföy Büyüklüğü'].pct_change() * 100
+        monthly_df['Aylık Değişim %'] = monthly_df['Aylık Değişim %'].apply(lambda x: f"{x:+.1f}%" if not pd.isna(x) else '-')
+        monthly_df['Portföy Büyüklüğü'] = monthly_df['Portföy Büyüklüğü'].apply(lambda x: f"₺{x:,.0f}")
 
     bm_s = bm.loc[start_date:last_date]
     return pv_df, ((bm_s / float(bm_s.iloc[0])) * start_capital if len(bm_s) > 0 else None), trades_df, active_now, monthly_df
 
 def calc_stats(pv_df, bm_norm, start_capital):
-    pv = pv_df['value']
-    total = (pv.iloc[-1] / start_capital - 1) * 100
+    pv = pv_df['value']; total = (pv.iloc[-1] / start_capital - 1) * 100
     n_yrs = max((pv_df.index[-1] - pv_df.index[0]).days / 365, 0.01)
     max_dd = (pv / pv.cummax() - 1).min() * 100
     bm_ret = (bm_norm.iloc[-1] / start_capital - 1) * 100 if bm_norm is not None else 0
-    return {
-        'Toplam Getiri': f"{total:+.1f}%", 'CAGR': f"{((pv.iloc[-1] / start_capital) ** (1/n_yrs) - 1) * 100:+.1f}%",
-        'Max Drawdown': f"{max_dd:.1f}%", 'BIST100 Getirisi': f"{bm_ret:+.1f}%", 'Alpha': f"{total - bm_ret:+.1f}%", 'Son Değer': f"₺{pv.iloc[-1]:,.0f}"
-    }
+    return {'Toplam Getiri': f"{total:+.1f}%", 'Yıllıklandırılmış Getiri (CAGR)': f"{((pv.iloc[-1] / start_capital) ** (1/n_yrs) - 1) * 100:+.1f}%", 'Maksimum Düşüş (Drawdown)': f"{max_dd:.1f}%", 'BIST100 Endeks Getirisi': f"{bm_ret:+.1f}%", 'Portföy Büyüklüğü': f"₺{pv.iloc[-1]:,.0f}"}
 
 STRAT_COLORS = {'emre': '#22c55e', 'momentum': '#a78bfa'}
 STRAT_LABELS = {'emre': '🟢 Emre\'nin Makro Stratejisi', 'momentum': '🟣 Momentum'}
