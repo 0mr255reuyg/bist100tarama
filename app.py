@@ -20,7 +20,6 @@ BIST100_YF = [t+".IS" for t in BIST100_TICKERS]
 
 st.set_page_config(page_title="BIST Strateji Tarayıcı", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
 
-# CSS stilleri (Aynı şekilde korundu)
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght=400;600;700&family=JetBrains+Mono:wght=400;500&display=swap');
@@ -40,7 +39,7 @@ div[data-testid="stButton"] button:hover { background-color: #e2e8f0 !important;
 </style>
 """, unsafe_allow_html=True)
 
-# Veri Çekme Fonksiyonları (Aynı)
+# ── DATA RETRIEVAL FONKSİYONLARI ──────────────────────────────────────────────
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_data(tickers, period, interval):
     data = {}
@@ -80,7 +79,7 @@ def fetch_benchmark(period, interval):
         return df.dropna(subset=['Close'])
     return pd.DataFrame()
 
-# İndikatörler (Aynı)
+# ── İNDİKATÖRLER VE STRATEJİ MATEMATİKLERİ ───────────────────────────────────
 def _c(df): return df['Close'].squeeze().dropna()
 def _h(df): return df['High'].squeeze().dropna()
 def _l(df): return df['Low'].squeeze().dropna()
@@ -90,8 +89,7 @@ def sma(s, n): return s.rolling(n).mean()
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
 def rsi_calc(s, n=14):
     d = s.diff()
-    g = d.clip(lower=0).rolling(n).mean()
-    l = (-d.clip(upper=0)).rolling(n).mean()
+    g = d.clip(lower=0).rolling(n).mean(); l = (-d.clip(upper=0)).rolling(n).mean()
     return (100 - 100/(1+g/l.replace(0, np.nan))).fillna(50)
 
 def stoch(h, l, c, k=14, smooth=3, d=3):
@@ -111,10 +109,8 @@ def vol_ratio(v, n=20):
 
 def rs_score(c, bm_c, days=20):
     common = c.index.intersection(bm_c.index)
-    c2 = c.loc[common]; bm2 = bm_c.loc[common]
-    return (float(c2.iloc[-1]/c2.iloc[-days]) - 1) - (float(bm2.iloc[-1]/bm2.iloc[-days]) - 1)
+    return (float(c.loc[common].iloc[-1]/c.loc[common].iloc[-days]) - 1) - (float(bm_c.loc[common].iloc[-1]/bm_c.loc[common].iloc[-days]) - 1)
 
-# ── STRATEJİ TANIMLAMALARI ────────────────────────────────────────────────────
 def score_emre(df, bm_df):
     try:
         c = _c(df); h = _h(df); l = _l(df); v = _v(df); bm = _c(bm_df)
@@ -130,20 +126,11 @@ def score_emre(df, bm_df):
     except Exception as e: return 0, 4, {"Hata": (False, str(e))}, {}
 
 def score_emre_advanced(df, bm_df, ticker):
-    """
-    EMRE GELİŞMİŞ STRATEJİSİ: Temel teknik puanı hesaplar, 
-    ancak hisse o anki makro faiz rejiminin desteklediği sektörde değilse eler veya cezalandırır.
-    """
     sc, mx, criteria, details = score_emre(df, bm_df)
     macro = get_tlref_macro_regime()
-    hisse_sektor = get_sector(ticker)
-    
-    # Makro filtre çarpanı veya katı kuralı
-    is_supported = hisse_sektor in macro["sectors"]
-    criteria["Makro Rüzgar Desteği"] = (is_supported, "Uyumlu Sektör" if is_supported else "Uyumsuz Sektör")
-    
-    new_score = sc + 1 if is_supported else sc
-    return new_score, mx + 1, criteria, details
+    is_supported = get_sector(ticker) in macro["sectors"]
+    criteria["Makro Rejim Uyum Desteği"] = (is_supported, "Uyumlu Güçlü Sektör" if is_supported else "Uyumsuz Sektör")
+    return (sc + 1 if is_supported else sc), mx + 1, criteria, details
 
 def score_momentum(df, bm_df):
     try:
@@ -167,160 +154,222 @@ STRATEGY_FN = {
     "momentum": (score_momentum, "Momentum Kırılımcısı")
 }
 
-# Grafik Fonksiyonu (Aynı)
 def build_chart(df, ticker, strategy, interval):
     c = _c(df); h = _h(df); l = _l(df); v = _v(df); o = df['Open'].squeeze()
-    s20 = sma(c,20); s50 = sma(c,50); ml, sl, hl_s = macd_calc(c); rsi_line = rsi_calc(c)
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, row_heights=[0.48,0.18,0.18,0.16], vertical_spacing=0.03)
-    fig.add_trace(go.Candlestick(x=df.index, open=o, high=h, low=l, close=c, name="Fiyat", increasing_fillcolor="#22c55e", increasing_line_color="#22c55e", decreasing_fillcolor="#ef4444", decreasing_line_color="#ef4444", line=dict(width=1)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=s20, name="SMA 20", line=dict(color="#22c55e",width=1.5,dash="dot")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=s50, name="SMA 50", line=dict(color="#f59e0b",width=1.5,dash="dash")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=rsi_line, name="RSI", line=dict(color="#38bdf8",width=1.5)), row=2, col=1)
-    fig.add_hrect(y0=80,y1=100,fillcolor="#ef4444",opacity=0.07,row=2,col=1)
-    fig.add_hline(y=80,line=dict(color="#ef4444",width=0.7,dash="dot"),row=2,col=1)
-    fig.update_layout(height=700, paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14", font=dict(family="JetBrains Mono", color="#94a3b8", size=11), margin=dict(l=10,r=10,t=35,b=10), xaxis_rangeslider_visible=False, title=dict(text=f"<b>{ticker.replace('.IS','')}</b>", font=dict(color="#f1f5f9",size=14),x=0.01), hovermode="x unified")
-    for i in range(1,5):
-        fig.update_xaxes(gridcolor="#1e2535",row=i,col=1)
-        fig.update_yaxes(gridcolor="#1e2535",row=i,col=1)
+    fig.add_trace(go.Candlestick(x=df.index, open=o, high=h, low=l, close=c, name="Fiyat", increasing_fillcolor="#22c55e", decreasing_fillcolor="#ef4444"), row=1, col=1)
+    fig.update_layout(height=600, paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14", font=dict(family="JetBrains Mono", color="#94a3b8"))
     return fig
 
-# ── TLREF GRAFİK OLUŞTURUCU (YENİ) ────────────────────────────────────────────
 def build_tlref_chart(df):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
     fig.add_trace(go.Scatter(x=df.index, y=df['TLREF'], name='Canlı TLREF', line=dict(color='#e2e8f0', width=1.8)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA8'], name='SMA 8 (2 Ay)', line=dict(color='#22c55e', width=1.5, dash='dot')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA54'], name='SMA 54 (1 Yıl)', line=dict(color='#f59e0b', width=1.5, dash='dash')), row=1, col=1)
-    
-    # ADX / DMI Bölümü
-    fig.add_trace(go.Scatter(x=df.index, y=df['ADX'], name='ADX (Trend Şiddeti)', line=dict(color='#a78bfa', width=2)), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['D+'], name='D+ (Alıcılar)', line=dict(color='#38bdf8', width=1.2, dash='dot')), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['D-'], name='D- (Satıcılar)', line=dict(color='#ef4444', width=1.2, dash='dot')), row=2, col=1)
-    
-    fig.update_layout(height=400, paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14", font=dict(family="JetBrains Mono", color="#94a3b8", size=10), margin=dict(l=10,r=10,t=10,b=10), hovermode="x unified")
+    fig.add_trace(go.Scatter(x=df.index, y=df['SMA8'], name='SMA 8', line=dict(color='#22c55e', dash='dot')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['SMA54'], name='SMA 54', line=dict(color='#f59e0b', dash='dash')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['ADX'], name='ADX Trend Şiddeti', line=dict(color='#a78bfa', width=2)), row=2, col=1)
+    fig.update_layout(height=350, paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14", font=dict(family="JetBrains Mono", size=10), margin=dict(l=10,r=10,t=10,b=10))
     return fig
 
 def render_detail(result, strategy, interval):
-    ticker_label = result["ticker"].replace(".IS","")
-    st.markdown(f"### {ticker_label} " f'<span class="stag">{get_sector(result["ticker"])}</span> ' f'`{result["score"]}/{result["max_score"]}`', unsafe_allow_html=True)
+    st.markdown(f"### {result['ticker'].replace('.IS','')} <span class=\"stag\">{get_sector(result['ticker'])}</span> `{result['score']}/{result['max_score']}`", unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     for i,(k,(passed,val)) in enumerate(result["criteria"].items()):
         icon="✅" if passed else "❌"; col="pass" if passed else "fail"
-        st.markdown(f'<div class="mc"><div class="ml">{k}</div><div class="mv {col}">{icon} {val}</div></div>', unsafe_allow_html=True)
-    st.markdown('<div class="sec">📈 Grafik</div>', unsafe_allow_html=True)
-    st.plotly_chart(build_chart(result["df"], result["ticker"], strategy, interval), use_container_width=True, config={"displayModeBar":False})
+        (c1 if i%2==0 else c2).markdown(f'<div class="mc"><div class="ml">{k}</div><div class="mv {col}">{icon} {val}</div></div>', unsafe_allow_html=True)
 
-# Header & States
-st.markdown('<div class="main-header">📊 BIST Strateji Tarayıcı</div>', unsafe_allow_html=True)
-st.markdown(f'<div class="sub-header">{datetime.now().strftime("%d.%m.%Y %H:%M")} · Canlı Entegrasyon Altyapısı</div>', unsafe_allow_html=True)
-
+# Session States
 defaults = {"strategy":None,"selected_ticker":None,"scan_done":False,"results":[],"page":"scanner","bt_done":False,"bt_results":{},"bm_df":None,"ai_messages":[]}
 for k,v in defaults.items():
     if k not in st.session_state: st.session_state[k] = v
 
-# Sidebar
+# Sidebar Layout
 with st.sidebar:
     st.markdown("### ⚙️ Ayarlar")
     interval = st.selectbox("Zaman Dilimi", ["1d","4h","1wk"], format_func=lambda x: {"1d":"Günlük (1D)","4h":"4 Saatlik (4H)","1wk":"Haftalık (1W)"}[x])
     period = {"1d":"6mo","4h":"60d","1wk":"2y"}[interval]
     st.markdown("---")
     st.markdown("### 🤖 Sekreter API Anahtarı")
-    gemini_key = st.text_input("Gemini API Key", type="password", placeholder="AI Sekreter için anahtar girin...")
+    gemini_key = st.text_input("Gemini API Key", type="password")
     if gemini_key: genai.configure(api_key=gemini_key)
     st.markdown("---")
-    if st.button("🤖 Finansal Sekreter Chat", use_container_width=True, type="primary"):
-        st.session_state.page = "ai_secretary"; st.rerun()
-    if st.button("🏭 Sektör Özeti & TLREF", use_container_width=True):
-        st.session_state.page = "sektor"; st.rerun()
-    if st.button("📊 Performans", use_container_width=True):
-        st.session_state.page = "perf"; st.rerun()
+    if st.button("🤖 Finansal Sekreter Chat", use_container_width=True, type="primary"): st.session_state.page = "ai_secretary"; st.rerun()
+    if st.button("🏭 Sektör Özeti & TLREF", use_container_width=True): st.session_state.page = "sektor"; st.rerun()
+    if st.button("📊 Performans & Backtest", use_container_width=True): st.session_state.page = "perf"; st.rerun()
 
-# Üst Butonlar
+# Üst Seçim Butonları
 col1, col2, col3 = st.columns(3)
 with col1:
-    if st.button("🟡 Emre'nin Stratejisi", use_container_width=True):
-        st.session_state.update(strategy="emre", page="scanner", scan_done=False); st.rerun()
+    if st.button("原 🟠 Emre'nin Stratejisi", use_container_width=True): st.session_state.update(strategy="emre", page="scanner", scan_done=False); st.rerun()
 with col2:
-    if st.button("🔥 Emre'nin Stratejisi (Gelişmiş)", use_container_width=True, type="primary"):
-        st.session_state.update(strategy="emre_adv", page="scanner", scan_done=False); st.rerun()
+    if st.button("🚀 🟢 Emre'nin Stratejisi (Gelişmiş)", use_container_width=True, type="primary"): st.session_state.update(strategy="emre_adv", page="scanner", scan_done=False); st.rerun()
 with col3:
-    if st.button("🟣 Momentum Kırılımcısı", use_container_width=True):
-        st.session_state.update(strategy="momentum", page="scanner", scan_done=False); st.rerun()
+    if st.button("🟣 Momentum Kırılımcısı", use_container_width=True): st.session_state.update(strategy="momentum", page="scanner", scan_done=False); st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════
-#  SAYFA: SEKTÖR ÖZETİ & TLREF MOTORU (GÜNCELLENDİ)
+#  SAYFA: SEKTÖR ÖZETİ & TLREF PANOSU (RESTORE EDİLDİ & GELİŞTİRİLDİ)
 # ═══════════════════════════════════════════════════════════════════
 if st.session_state.page == "sektor":
+    st.markdown("### 📈 BIST 100 Endeks Genel Performansı")
+    with st.spinner("Endeks verileri okunuyor..."):
+        xu100 = fetch_benchmark("6mo", "1d")
+    if not xu100.empty:
+        c_xu = xu100['Close'].squeeze()
+        r1d = (c_xu.iloc[-1] / c_xu.iloc[-2] - 1) * 100
+        r5d = (c_xu.iloc[-1] / c_xu.iloc[-6] - 1) * 100
+        r30d = (c_xu.iloc[-1] / c_xu.iloc[-22] - 1) * 100
+        
+        xc1, xc2, xc3 = st.columns(3)
+        xc1.markdown(f'<div class="mc"><div class="ml">BIST 100 Son Kapanış</div><div class="mv {"pass" if r1d>=0 else "fail"}">{r1d:+.2f}%</div></div>', unsafe_allow_html=True)
+        xc2.markdown(f'<div class="mc"><div class="ml">BIST 100 1 Haftalık</div><div class="mv {"pass" if r5d>=0 else "fail"}">{r5d:+.2f}%</div></div>', unsafe_allow_html=True)
+        xc3.markdown(f'<div class="mc"><div class="ml">BIST 100 1 Aylık</div><div class="mv {"pass" if r30d>=0 else "fail"}">{r30d:+.2f}%</div></div>', unsafe_allow_html=True)
+
     macro = get_tlref_macro_regime()
-    st.markdown(f"## 📊 Canlı Makroekonomik Faiz Motoru (TLREF)")
+    with st.spinner("Sektör canlı momentumları hesaplanıyor..."):
+        stock_s = fetch_data(BIST100_YF,"3mo","1d")
+    full_df = _sector_returns(stock_s)
     
-    # 3'lü Gösterge Panosu
+    st.markdown("---")
+    st.markdown("## 📊 Canlı Makroekonomik Faiz Motoru (TLREF)")
     mc1, mc2 = st.columns([1.5, 2.5])
     with mc1:
-        st.markdown(f'<div class="mc" style="border-left: 5px solid #a78bfa;"><div class="ml">Mevcut Faiz Rejimi</div><div class="mv" style="font-size:1.3rem; color:#a78bfa;">{macro["regime"]}</div><div style="font-size:0.75rem; color:#64748b; margin-top:5px;">Canlı TLREF Oranı: %{macro["current_rate"]:.2f}</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="mc" style="border-left: 5px solid #a78bfa; min-height:120px;"><div class="ml">Mevcut Faiz Rejimi</div><div class="mv" style="font-size:1.3rem; color:#a78bfa;">{macro["regime"]}</div><div style="font-size:0.75rem; color:#64748b; margin-top:5px;">Canlı Faiz Oranı: %{macro["current_rate"]:.2f}</div></div>', unsafe_allow_html=True)
     with mc2:
-        st.markdown(f'<div class="mc" style="border-left: 5px solid #22c55e;"><div class="ml">Desteklenen Sektörler</div><div class="mv" style="font-size:0.95rem; color:#22c55e;">{" · ".join(macro["sectors"])}</div><div style="font-size:0.75rem; color:#94a3b8; margin-top:5px;">{macro["description"]}</div></div>', unsafe_allow_html=True)
+        sect_perf_str = []
+        for s in macro["sectors"]:
+            if not full_df.empty and s in full_df['sector'].values:
+                row = full_df[full_df['sector'] == s].iloc[0]
+                sect_perf_str.append(f"<b>{s}</b> (<span class='pass'>{row['ret_5d']:+.1f}% 1H</span> / <span class='pass'>{row['ret_21d']:+.1f}% 1A</span>)")
+            else:
+                sect_perf_str.append(f"<b>{s}</b>")
+        st.markdown(f'<div class="mc" style="border-left: 5px solid #22c55e; min-height:120px;"><div class="ml">Desteklenen Sektör Performansları</div><div class="mv" style="font-size:0.85rem; font-weight:normal; line-height:1.4rem;">{" · ".join(sect_perf_str)}</div><div style="font-size:0.72rem; color:#94a3b8; margin-top:3px;">{macro["description"]}</div></div>', unsafe_allow_html=True)
         
     st.plotly_chart(build_tlref_chart(macro["df"]), use_container_width=True, config={"displayModeBar":False})
     
-    st.markdown("---")
-    st.markdown("### 🏭 BİST Sektörel Dağılım ve Momentum Oranları")
-    with st.spinner("Sektör momentumları hesaplanıyor..."):
-        stock_s = fetch_data(BIST100_YF,"3mo","1d")
+    # KUTUCUKLU 9'LU GRİD YAPISI (GERİ GETİRİLDİ)
+    st.markdown("### 📰 Günün Sektör Manşetleri")
     summary = build_summary(stock_s)
+    CAT_STYLE = {
+        "🚀 SON KAPANIŞ LİDERİ":  ("#14532d","#22c55e"), "⚡ İVME KAZANAN":        ("#14532d","#4ade80"),
+        "📈 1 HAFTA ZİRVE":        ("#14532d","#86efac"), "🏆 1 AY ZİRVE":          ("#14532d","#bbf7d0"),
+        "🔄 TOPARLAYAN":          ("#1c3a1c","#a3e635"), "📉 SON KAPANIŞTA GERİDE":("#4c0519","#ef4444"),
+        "❄️ 1 HAFTA DİP":        ("#4c0519","#f87171"), "🪨 1 AY DİP":            ("#4c0519","#fca5a5"), "🐌 YAVAŞLAYAN":          ("#2c1810","#fb923c"),
+    }
+    def cat_card(title, items, bg, border):
+        rows=""
+        for sect,val in items:
+            vc="#22c55e" if val.startswith("+") else "#ef4444" if val.startswith("-") else "#94a3b8"
+            rows+=(f'<div style="display:flex;justify-content:space-between;padding:.3rem 0;border-bottom:1px solid #1e2535;font-size:.83rem;"><span style="color:#e2e8f0">{sect}</span><span style="color:{vc};font-family:JetBrains Mono;font-weight:600">{val}</span></div>')
+        return (f'<div style="background:{bg};border:1px solid {border};border-radius:10px;padding:1rem 1.2rem;margin-bottom:.8rem"><div style="font-size:.7rem;font-weight:700;color:{border};text-transform:uppercase;letter-spacing:.1em;margin-bottom:.6rem;font-family:JetBrains Mono">{title}</div>{rows}</div>')
+
+    rows_layout = [["🚀 SON KAPANIŞ LİDERİ","⚡ İVME KAZANAN"], ["📈 1 HAFTA ZİRVE","🏆 1 AY ZİRVE"], ["🔄 TOPARLAYAN","📉 SON KAPANIŞTA GERİDE"], ["❄️ 1 HAFTA DİP","🪨 1 AY DİP"], ["🐌 YAVAŞLAYAN",None]]
+    for row_cats in rows_layout:
+        cols = st.columns(2)
+        for col,cat in zip(cols,row_cats):
+            if cat and cat in summary:
+                bg,border = CAT_STYLE.get(cat,("#161b27","#475569"))
+                col.markdown(cat_card(cat, summary[cat], bg, border), unsafe_allow_html=True)
+
+    st.markdown("---")
     bar_chart = build_sector_bar_chart(stock_s)
     if bar_chart: st.plotly_chart(bar_chart, use_container_width=True, config={"displayModeBar":False})
     st.stop()
 
 # ═══════════════════════════════════════════════════════════════════
-#  SAYFA: GÖREN AI FINANSAL SEKRETER (YENİ)
+#  SAYFA: PERFORMANCE / BACKTEST PANELİ (TAMAMEN ONARILDI)
+# ═══════════════════════════════════════════════════════════════════
+if st.session_state.page == "perf":
+    st.markdown("## 📊 Strateji Performans ve Karşılaştırmalı Backtest Modülü")
+    st.markdown("Haziran 2024'ten günümüze portföy dağılımları · Her ay başı rebalans · 100.000 ₺ başlangıç sermayesi")
+    st.markdown("---")
+
+    if st.button("▶️ Tüm Karşılaştırmalı Backtestleri Çalıştır", type="primary", use_container_width=True):
+        with st.spinner("2 yıllık BIST geçmiş verileri analiz ediliyor (1 dakika sürebilir)..."):
+            bm_df_bt = fetch_benchmark("2y","1d")
+            stock_bt = fetch_data(BIST100_YF,"2y","1d")
+            
+        bt_results = {}
+        prog = st.progress(0)
+        strats_to_run = ["emre", "emre_adv", "momentum"]
+        for i, sk in enumerate(strats_to_run):
+            prog.progress((i+1)/3, text=f"{STRAT_LABELS[sk]} simüle ediliyor...")
+            pv, bm_n, trades, active, monthly = run_backtest(sk, stock_bt, bm_df_bt)
+            bt_results[sk] = {"pv": pv, "bm": bm_n, "trades": trades, "active": active, "monthly": monthly, "stats": calc_stats(pv, bm_n, 100_000) if pv is not None else {}}
+        prog.empty()
+        st.session_state.bt_results = bt_results
+        st.session_state.bt_done = True
+
+    if not st.session_state.bt_done:
+        st.info("📊 Geçmişten günümüze performans çizelgelerini listelemek için lütfen yukarıdaki butona tıklayarak simülasyonu başlatın.")
+        st.stop()
+
+    bt_results = st.session_state.bt_results
+    st.markdown("### 📈 Strateji Performans Karşılaştırma Grafiği")
+    perf_map = {sk: (bt_results[sk]["pv"], bt_results[sk]["bm"]) for sk in ["emre", "emre_adv", "momentum"] if bt_results[sk].get("pv") is not None}
+    if perf_map:
+        st.plotly_chart(build_perf_chart(perf_map, 100_000), use_container_width=True, config={"displayModeBar":False})
+
+    st.markdown("### 📐 Temel Strateji İstatistikleri")
+    s1, s2, s3 = st.columns(3)
+    for col, sk in zip([s1, s2, s3], ["emre", "emre_adv", "momentum"]):
+        with col:
+            st.markdown(f"**{STRAT_LABELS[sk]}**")
+            for k, v in bt_results[sk].get("stats",{}).items():
+                st.markdown(f'<div class="mc"><div class="ml">{k}</div><div class="mv">{v}</div></div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("### 📅 Aylık Portföy Değişim Detayları")
+    t1, t2, t3 = st.tabs([STRAT_LABELS["emre"], STRAT_LABELS["emre_adv"], STRAT_LABELS["momentum"]])
+    for tab, sk in zip([t1, t2, t3], ["emre", "emre_adv", "momentum"]):
+        with tab:
+            mdf = bt_results[sk].get("monthly")
+            if mdf is not None and len(mdf) > 0: st.dataframe(mdf, use_container_width=True, height=400)
+
+    st.markdown("### 📋 Geçmiş İşlem Log Defteri")
+    lt1, lt2, lt3 = st.tabs([STRAT_LABELS["emre"], STRAT_LABELS["emre_adv"], STRAT_LABELS["momentum"]])
+    for tab, sk in zip([lt1, lt2, lt3], ["emre", "emre_adv", "momentum"]):
+        with tab:
+            trades = bt_results[sk].get("trades")
+            if trades is not None and len(trades) > 0: st.dataframe(trades[trades["İşlem"]=="SATIŞ"].reset_index(drop=True), use_container_width=True, height=300)
+    st.stop()
+
+# ═══════════════════════════════════════════════════════════════════
+#  SAYFA: AI FINANSAL SEKRETER CHAT KATMANI (Aynı)
 # ═══════════════════════════════════════════════════════════════════
 if st.session_state.page == "ai_secretary":
-    st.markdown("## 🤖 Finansal Sekreter (Sistem Bilgisine Hakim)")
-    if not gemini_key:
-        st.warning("⚠️ Lütfen sol menüden bir Gemini API Key giriniz.")
+    st.markdown("## 🤖 Yapay Zeka Finansal Sekreteri")
+    if not gemini_key: st.warning("⚠️ Lütfen sol menüden API anahtarınızı giriniz.")
     else:
         macro_info = get_tlref_macro_regime()
         top_stocks_context = [r['ticker'].replace(".IS","") for r in st.session_state.results if r.get('in_top5')]
-        
-        # AI'ın körlüğünü bitiren gizli sistem promptu injection katmanı
-        system_prompt = f"""Sen Emre'nin gelişmiş algo-trading finans asistanısın. Uygulamanın hesapladığı canlı veriler aşağıdadır:
-        - Mevcut Makro Faiz Rejimi: {macro_info['regime']}
-        - Rejimin Olumlu Etkilediği Sektörler: {', '.join(macro_info['sectors'])}
-        - Tarayıcıda Çıkan En Son Top Hisse Önerileri: {', '.join(top_stocks_context) if top_stocks_context else 'Henüz tarama yapılmadı.'}
-        Bu bilgilere tam hakim olarak konuş. Cevaplarını kısa, veri odaklı ve profesyonel bir quat analisti gibi ver. Asla varant (warrant) araçlarından bahsetme, kapsam dışıdır."""
-        
+        system_prompt = f"Sen Emre'nin gelişmiş algo-trading asistanısın. Canlı durum: Faiz Rejimi={macro_info['regime']}, Sektörler={', '.join(macro_info['sectors'])}, Önerilen Top Hisseler={', '.join(top_stocks_context)}. Kısa ve profesyonel yorumlar yap. Varant konusuna kesinlikle girmek yasaktır."
         for msg in st.session_state.ai_messages:
             with st.chat_message(msg["role"]): st.write(msg["content"])
-                
-        user_query = st.chat_input("Mevcut faiz rejimi ve hisseler hakkında soru sorun...")
+        user_query = st.chat_input("Sekretere bir soru sorun...")
         if user_query:
             with st.chat_message("user"): st.write(user_query)
             st.session_state.ai_messages.append({"role": "user", "content": user_query})
-            
             try:
                 model = genai.GenerativeModel('gemini-1.5-flash')
-                with st.spinner("Analiz ediliyor..."):
-                    response = model.generate_content(f"{system_prompt}\n\nKullanıcı: {user_query}")
+                response = model.generate_content(f"{system_prompt}\n\nKullanıcı: {user_query}")
                 with st.chat_message("assistant"): st.write(response.text)
                 st.session_state.ai_messages.append({"role": "assistant", "content": response.text})
             except Exception as e: st.error(f"Hata: {e}")
     st.stop()
 
 # ═══════════════════════════════════════════════════════════════════
-#  SAYFA: SCANNER / TARAYICI
+#  SAYFA: SCANNER / TARAYICI ANA MODÜL (RESTORE EDİLDİ)
 # ═══════════════════════════════════════════════════════════════════
 if st.session_state.strategy is None:
-    st.info("👆 Yukarıdaki butonlardan çalıştırmak istediğin stratejiyi seç.")
+    st.info("👆 Lütfen üst paneldeki butonları kullanarak çalıştırılacak strateji mimarisini seçin.")
     st.stop()
 
 strat = st.session_state.strategy
-st.markdown(f"**Aktif Strateji Modülü:** `{STRATEGY_FN[strat][1]}` · Zaman Dilimi: `{interval.upper()}`")
-
+st.markdown(f"**Aktif Strateji Modülü:** `{STRAT_LABELS.get(strat, strat)}` · Zaman Dilimi: `{interval.upper()}`")
 if st.button("🔍 Tüm BIST Listesini Canlı Tara", type="primary", use_container_width=True):
     st.session_state.update(scan_done=False, results=[], selected_ticker=None)
 
 if not st.session_state.scan_done:
-    with st.spinner("Veriler işleniyor..."):
+    with st.spinner("Piyasa verileri indiriliyor ve taranıyor..."):
         bm_df = fetch_benchmark(period, interval)
         stock_data = fetch_data(BIST100_YF, period, interval)
     results = []
@@ -334,16 +383,13 @@ if not st.session_state.scan_done:
         except Exception: pass
     results.sort(key=lambda x: (x['score'], x['rs']), reverse=True)
     
-    # Sektör Limit Atama Kontrolleri
     t_count = 0; s_counts = {}
     for r in results:
         sect = r['sector']
         if t_count < 5 and (strat != "emre" and strat != "emre_adv" or s_counts.get(sect, 0) < 2):
             r['in_top5'] = True; s_counts[sect] = s_counts.get(sect, 0) + 1; t_count += 1
-            
     st.session_state.update(results=results, scan_done=True); st.rerun()
 
-# Listeleme Arayüzü (Aynı şekilde render_detail fonksiyonuna bağlanır)
 top5_r = [r for r in st.session_state.results if r.get('in_top5')]
 near_r = [r for r in st.session_state.results if not r.get('in_top5')]
 left, right = st.columns([1, 2.4], gap="large")
