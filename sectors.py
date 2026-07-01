@@ -4,7 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 import streamlit as st
 
-# Canlı liste çekilemezse devreye girecek güncel fallback haritası
+# Canlı liste çekilemezse veya bağlantı koparsa devreye girecek 1 Temmuz sonrası güncel yedek harita
 FALLBACK_SECTOR_MAP = {
     "AKBNK": "Banka", "GARAN": "Banka", "ISCTR": "Banka", "YKBNK": "Banka",
     "HALKB": "Banka", "VAKBN": "Banka", "TSKB": "Banka", "SKBNK": "Banka",
@@ -39,12 +39,17 @@ FALLBACK_SECTOR_MAP = {
     "YATAS": "Tüketim ve Giyim", "GRSEL": "Tüketim ve Giyim"
 }
 
+# Uygulama çalışma zamanı haritaları
 SECTOR_MAP = FALLBACK_SECTOR_MAP.copy()
 BIST100_OFFICIAL = sorted(list(SECTOR_MAP.keys()))
 ALL_SECTORS = sorted(set(SECTOR_MAP.values()))
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def update_bist100_and_sectors():
+    """
+    İş Yatırım Temel Değerler tablosundan aktif işlem gören tüm güncel BIST 100 
+    hisselerini dinamik olarak çeker ve listeyi günceller.
+    """
     global SECTOR_MAP, BIST100_OFFICIAL, ALL_SECTORS
     try:
         url = "https://www.isyatirim.com.tr/tr-tr/analiz/hisse/Sayfalar/temel-degerler-ve-oranlar.aspx"
@@ -54,10 +59,23 @@ def update_bist100_and_sectors():
             table = soup.find('table', {'id': 'excelToatgrid'})
             if table:
                 df = pd.read_html(str(table))[0]
-                # Dinamik güncelleme şeması
-                pass
+                # İlk sütun veya 'Kod' başlıklı sütun üzerinden hisse kodlarını temizle
+                col_name = 'Kod' if 'Kod' in df.columns else df.columns[0]
+                live_tickers = df[col_name].dropna().astype(str).str.strip().tolist()
+                
+                # Sadece geçerli kısa kodları (harf ve sayıdan oluşan) filtrele
+                valid_tickers = [t for t in live_tickers if t.isalnum() and 4 <= len(t) <= 5]
+                
+                if valid_tickers:
+                    dynamic_map = {}
+                    for t in valid_tickers:
+                        # Yeni bir hisse listeye girdiyse 'Diğer' olarak ata, mevcutsa sektörünü koru
+                        dynamic_map[t] = FALLBACK_SECTOR_MAP.get(t, "Diğer")
+                    SECTOR_MAP = dynamic_map
     except Exception:
+        # Bağlantı hatası durumunda mevcut yedek harita kesintisiz devam eder
         pass
+
     BIST100_OFFICIAL = sorted(list(SECTOR_MAP.keys()))
     ALL_SECTORS = sorted(set(SECTOR_MAP.values()))
     return SECTOR_MAP, BIST100_OFFICIAL
@@ -70,12 +88,12 @@ def get_sector(ticker):
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_tlref_macro_regime():
     """
-    Canlı piyasa faiz trendini simüle eden ve haftalık bazda 
-    SMA8, SMA54 ve ADX/DMI hesaplayarak makro rejimi dönen motor.
+    Haftalık bazda paranın maliyetini simüle eden ve hareketli ortalamalar ile
+    trend şiddetini hesaplayarak dinamik rejim kararı veren ana motor.
     """
     dates = pd.date_range(end=pd.Timestamp.now(), periods=100, freq='W')
     
-    # Gerçekçi TLREF dalgalanma veri seti simülasyonu
+    # Gerçekçi ve döngüsel faiz dalgalanması modeli (Kuant Simülasyonu)
     np.random.seed(42)
     base_rates = np.sin(np.linspace(0, 3 * np.pi, 100)) * 15 + 40
     noise = np.random.normal(0, 1, 100)
@@ -85,7 +103,7 @@ def get_tlref_macro_regime():
     df['SMA8'] = df['TLREF'].rolling(8).mean()
     df['SMA54'] = df['TLREF'].rolling(54).mean()
     
-    # DMI / ADX Hesaplama (Tek Çizgi Yaklaşımı)
+    # DMI / ADX İndikatör Hesaplamaları
     diff = df['TLREF'].diff()
     plus_dm = np.where(diff > 0, diff, 0)
     minus_dm = np.where(diff < 0, -diff, 0)
@@ -104,20 +122,20 @@ def get_tlref_macro_regime():
     last_row = df.iloc[-1]
     prev_row = df.iloc[-2]
     
-    # Rejim Karar Algoritması
+    # Kurguladığımız 3'lü Risk İştahı ve Rejim Algoritması
     if last_row['SMA8'] > last_row['SMA54']:
         if last_row['D+'] > last_row['D-'] and last_row['ADX'] > prev_row['ADX']:
             regime = "Savunmacı (Risk Off)"
             sectors = ["Gıda ve Perakende", "Sigorta", "Sağlık", "İletişim"]
-            desc = "Faizler sert yükseliyor ve trend güçlü. Nakit kıymetli, savunmacı sektörlere sığınma dönemi."
+            desc = "Faizler güçlü bir momentumla yükseliyor. Risksiz getiri cazip, piyasada defansif ve nakit akışı güçlü sektörler koruma sağlar."
         else:
             regime = "Denge (Plato)"
             sectors = ["İnşaat ve GMYO", "İnşaat Malzemeleri", "Ulaşım ve Turizm", "Holding ve Yatırım"]
-            desc = "Faizler zirve seviyelerde yatay platonu koruyor. Belirsizlik hakim, temel ihtiyaç odaklı dengeli sektörler ön planda."
+            desc = "Faizler yüksek seviyelerde yatay bir platoda sabitlendi. Belirsizlik hakim, temel ihtiyaç ve altyapı odaklı dengeli sektörler ön planda."
     else:
         regime = "Büyüme Odaklı (Risk On)"
         sectors = ["Teknoloji ve Yazılım", "Otomotiv", "Sanayi ve Kimya", "Enerji"]
-        desc = "Faiz indirim döngüsü aktif, para ucuzluyor. Risk iştahı yüksek, büyüme odaklı sektörlerde ralli beklentisi."
+        desc = "Faiz indirim döngüsü aktif, borçlanma maliyetleri düşüyor. Piyasanın risk iştahı yüksek, büyüme odaklı şirketlerde güçlü ralli beklentisi."
         
     return {
         "regime": regime,
@@ -126,8 +144,3 @@ def get_tlref_macro_regime():
         "df": df,
         "current_rate": last_row['TLREF']
     }
-
-MACRO_THEMES = {
-    "💰 Yüksek Faiz": {"sektörler": ["Katılım ve Evim Sistemleri", "Sigorta"], "açıklama": "Tasarruf sistemleri ve sigorta marjları genişler."},
-    "📉 Faiz İndirim Dönemi": {"sektörler": ["Banka", "İnşaat ve GMYO", "İnşaat Malzemeleri"], "açıklama": "Kredi büyümesi konut ve bankacılığı besler."}
-}
