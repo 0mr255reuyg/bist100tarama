@@ -6,7 +6,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
 import warnings
-import google.generativeai as genai
 
 warnings.filterwarnings('ignore')
 
@@ -22,7 +21,7 @@ st.set_page_config(page_title="BIST Strateji Tarayıcı", page_icon="📈", layo
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght=400;600;700&family=JetBrains+Mono:wght=400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 html,body,[class*="css"]{font-family:'Inter',sans-serif;}
 .stApp{background-color:#0d0f14;color:#e2e8f0;}
 .main-header{font-size:1.8rem;font-weight:700;color:#f1f5f9;letter-spacing:-0.03em;}
@@ -59,18 +58,6 @@ def fetch_data(tickers, period, interval):
     return data
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_single(ticker, period, interval):
-    try:
-        df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False, timeout=10)
-        if df is not None and len(df) > 10:
-            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-            for col in ['Open','High','Low','Close','Volume']:
-                if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
-            return df.dropna(subset=['Close'])
-    except Exception: pass
-    return None
-
-@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_benchmark(period, interval):
     df = yf.download("XU100.IS", period=period, interval=interval, auto_adjust=True, progress=False, timeout=10)
     if df is not None and len(df) > 0:
@@ -92,12 +79,6 @@ def rsi_calc(s, n=14):
     g = d.clip(lower=0).rolling(n).mean(); l = (-d.clip(upper=0)).rolling(n).mean()
     return (100 - 100/(1+g/l.replace(0, np.nan))).fillna(50)
 
-def stoch(h, l, c, k=14, smooth=3, d=3):
-    lo = l.rolling(k).min(); hi = h.rolling(k).max()
-    raw = 100*(c-lo)/(hi-lo).replace(0, np.nan)
-    ks = raw.rolling(smooth).mean().fillna(50)
-    return ks, ks.rolling(d).mean().fillna(50)
-
 def macd_calc(s, fast=12, slow=26, sig=9):
     m = ema(s,fast)-ema(s,slow); sg = ema(m.fillna(0), sig)
     return m, sg, m-sg
@@ -111,26 +92,32 @@ def rs_score(c, bm_c, days=20):
     common = c.index.intersection(bm_c.index)
     return (float(c.loc[common].iloc[-1]/c.loc[common].iloc[-days]) - 1) - (float(bm_c.loc[common].iloc[-1]/bm_c.loc[common].iloc[-days]) - 1)
 
-def score_emre(df, bm_df):
+def score_emre(df, bm_df, ticker):
     try:
         c = _c(df); h = _h(df); l = _l(df); v = _v(df); bm = _c(bm_df)
         price = float(c.iloc[-1]); s20 = float(sma(c,20).iloc[-1]); s50 = float(sma(c,50).iloc[-1]); rsi_v = float(rsi_calc(c).iloc[-1]); rs = rs_score(c, bm, 20); vr = vol_ratio(v, 20)
+        
         criteria = {
             "RS Pozitif (20g vs BIST)": (not np.isnan(rs) and rs > 0, f"{rs*100:.1f}%"),
             "SMA20 & SMA50 Üstünde": (price > s20 and price > s50, f"{price:.2f} > {s20:.2f}"),
             "Hacim Ortalamanın Üstünde": (not np.isnan(vr) and vr >= 0.9, f"{vr:.2f}x"),
             "RSI < 80": (rsi_v < 80, f"RSI={rsi_v:.1f}"),
         }
+        
+        sc = sum(1 for p,_ in criteria.values() if p)
+        mx = 4
+        
+        # Makroekonomik Faiz Rejimi Filtresi
+        macro = get_tlref_macro_regime()
+        is_supported = get_sector(ticker) in macro["sectors"]
+        criteria["Makro Rejim Uyum Desteği"] = (is_supported, "Uyumlu Sektör" if is_supported else "Uyumsuz Sektör")
+        
+        sc = sc + 1 if is_supported else sc
+        mx += 1
+        
         details = {"Fiyat": f"{price:.2f} ₺", "SMA 20": f"{s20:.2f}", "SMA 50": f"{s50:.2f}", "RSI (14)": f"{rsi_v:.1f}", "RS (20g)": f"{rs*100:.1f}%", "Hacim Oran.": f"{vr:.2f}x"}
-        return sum(1 for p,_ in criteria.values() if p), 4, criteria, details
-    except Exception as e: return 0, 4, {"Hata": (False, str(e))}, {}
-
-def score_emre_advanced(df, bm_df, ticker):
-    sc, mx, criteria, details = score_emre(df, bm_df)
-    macro = get_tlref_macro_regime()
-    is_supported = get_sector(ticker) in macro["sectors"]
-    criteria["Makro Rejim Uyum Desteği"] = (is_supported, "Uyumlu Güçlü Sektör" if is_supported else "Uyumsuz Sektör")
-    return (sc + 1 if is_supported else sc), mx + 1, criteria, details
+        return sc, mx, criteria, details
+    except Exception as e: return 0, 5, {"Hata": (False, str(e))}, {}
 
 def score_momentum(df, bm_df):
     try:
@@ -149,9 +136,8 @@ def score_momentum(df, bm_df):
     except Exception as e: return 0, 4, {"Hata": (False, str(e))}, {}
 
 STRATEGY_FN = {
-    "emre": (score_emre, "Emre'nin Stratejisi"),
-    "emre_adv": (lambda df, bm: score_emre_advanced(df, bm, st.session_state.get('active_scanning_ticker', '')), "Emre'nin Stratejisi (Gelişmiş)"),
-    "momentum": (score_momentum, "Momentum Kırılımcısı")
+    "emre": (lambda df, bm: score_emre(df, bm, st.session_state.get('active_scanning_ticker', '')), "Emre'nin Makro Stratejisi"),
+    "momentum": (lambda df, bm: score_momentum(df, bm), "Momentum Kırılımcısı")
 }
 
 def build_chart(df, ticker, strategy, interval):
@@ -161,13 +147,18 @@ def build_chart(df, ticker, strategy, interval):
     fig.update_layout(height=600, paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14", font=dict(family="JetBrains Mono", color="#94a3b8"))
     return fig
 
+# D+ ve D- DÜZELTİLDİ: Kalın ve net çizgiler
 def build_tlref_chart(df):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
     fig.add_trace(go.Scatter(x=df.index, y=df['TLREF'], name='Canlı TLREF', line=dict(color='#e2e8f0', width=1.8)), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['SMA8'], name='SMA 8', line=dict(color='#22c55e', dash='dot')), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['SMA54'], name='SMA 54', line=dict(color='#f59e0b', dash='dash')), row=1, col=1)
+    
     fig.add_trace(go.Scatter(x=df.index, y=df['ADX'], name='ADX Trend Şiddeti', line=dict(color='#a78bfa', width=2)), row=2, col=1)
-    fig.update_layout(height=350, paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14", font=dict(family="JetBrains Mono", size=10), margin=dict(l=10,r=10,t=10,b=10))
+    fig.add_trace(go.Scatter(x=df.index, y=df['D+'], name='D+ (Alıcılar)', line=dict(color='#22c55e', width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['D-'], name='D- (Satıcılar)', line=dict(color='#ef4444', width=2)), row=2, col=1)
+    
+    fig.update_layout(height=380, paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14", font=dict(family="JetBrains Mono", size=10), margin=dict(l=10,r=10,t=10,b=10))
     return fig
 
 def render_detail(result, strategy, interval):
@@ -178,7 +169,7 @@ def render_detail(result, strategy, interval):
         (c1 if i%2==0 else c2).markdown(f'<div class="mc"><div class="ml">{k}</div><div class="mv {col}">{icon} {val}</div></div>', unsafe_allow_html=True)
 
 # Session States
-defaults = {"strategy":None,"selected_ticker":None,"scan_done":False,"results":[],"page":"scanner","bt_done":False,"bt_results":{},"bm_df":None,"ai_messages":[]}
+defaults = {"strategy":None,"selected_ticker":None,"scan_done":False,"results":[],"page":"scanner","bt_done":False,"bt_results":{},"bm_df":None}
 for k,v in defaults.items():
     if k not in st.session_state: st.session_state[k] = v
 
@@ -188,25 +179,18 @@ with st.sidebar:
     interval = st.selectbox("Zaman Dilimi", ["1d","4h","1wk"], format_func=lambda x: {"1d":"Günlük (1D)","4h":"4 Saatlik (4H)","1wk":"Haftalık (1W)"}[x])
     period = {"1d":"6mo","4h":"60d","1wk":"2y"}[interval]
     st.markdown("---")
-    st.markdown("### 🤖 Sekreter API Anahtarı")
-    gemini_key = st.text_input("Gemini API Key", type="password")
-    if gemini_key: genai.configure(api_key=gemini_key)
-    st.markdown("---")
-    if st.button("🤖 Finansal Sekreter Chat", use_container_width=True, type="primary"): st.session_state.page = "ai_secretary"; st.rerun()
     if st.button("🏭 Sektör Özeti & TLREF", use_container_width=True): st.session_state.page = "sektor"; st.rerun()
     if st.button("📊 Performans & Backtest", use_container_width=True): st.session_state.page = "perf"; st.rerun()
 
-# Üst Seçim Butonları
-col1, col2, col3 = st.columns(3)
+# Üst Seçim Butonları (Sadece 2 Tane Kaldı)
+col1, col2 = st.columns(2)
 with col1:
-    if st.button("原 🟠 Emre'nin Stratejisi", use_container_width=True): st.session_state.update(strategy="emre", page="scanner", scan_done=False); st.rerun()
+    if st.button("🟢 Emre'nin Makro Stratejisi", use_container_width=True, type="primary"): st.session_state.update(strategy="emre", page="scanner", scan_done=False); st.rerun()
 with col2:
-    if st.button("🚀 🟢 Emre'nin Stratejisi (Gelişmiş)", use_container_width=True, type="primary"): st.session_state.update(strategy="emre_adv", page="scanner", scan_done=False); st.rerun()
-with col3:
     if st.button("🟣 Momentum Kırılımcısı", use_container_width=True): st.session_state.update(strategy="momentum", page="scanner", scan_done=False); st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════
-#  SAYFA: SEKTÖR ÖZETİ & TLREF PANOSU (RESTORE EDİLDİ & GELİŞTİRİLDİ)
+#  SAYFA: SEKTÖR ÖZETİ & TLREF PANOSU
 # ═══════════════════════════════════════════════════════════════════
 if st.session_state.page == "sektor":
     st.markdown("### 📈 BIST 100 Endeks Genel Performansı")
@@ -245,7 +229,6 @@ if st.session_state.page == "sektor":
         
     st.plotly_chart(build_tlref_chart(macro["df"]), use_container_width=True, config={"displayModeBar":False})
     
-    # KUTUCUKLU 9'LU GRİD YAPISI (GERİ GETİRİLDİ)
     st.markdown("### 📰 Günün Sektör Manşetleri")
     summary = build_summary(stock_s)
     CAT_STYLE = {
@@ -275,11 +258,11 @@ if st.session_state.page == "sektor":
     st.stop()
 
 # ═══════════════════════════════════════════════════════════════════
-#  SAYFA: PERFORMANCE / BACKTEST PANELİ (TAMAMEN ONARILDI)
+#  SAYFA: PERFORMANCE / BACKTEST PANELİ
 # ═══════════════════════════════════════════════════════════════════
 if st.session_state.page == "perf":
     st.markdown("## 📊 Strateji Performans ve Karşılaştırmalı Backtest Modülü")
-    st.markdown("Haziran 2024'ten günümüze portföy dağılımları · Her ay başı rebalans · 100.000 ₺ başlangıç sermayesi")
+    st.markdown("Haziran 2024'ten günümüze portföy dağılımları · **Her ay başı Kümülatif Eşit Ağırlık Rebalansı** · 100.000 ₺ başlangıç sermayesi")
     st.markdown("---")
 
     if st.button("▶️ Tüm Karşılaştırmalı Backtestleri Çalıştır", type="primary", use_container_width=True):
@@ -289,9 +272,9 @@ if st.session_state.page == "perf":
             
         bt_results = {}
         prog = st.progress(0)
-        strats_to_run = ["emre", "emre_adv", "momentum"]
+        strats_to_run = ["emre", "momentum"]
         for i, sk in enumerate(strats_to_run):
-            prog.progress((i+1)/3, text=f"{STRAT_LABELS[sk]} simüle ediliyor...")
+            prog.progress((i+1)/2, text=f"{STRAT_LABELS[sk]} simüle ediliyor...")
             pv, bm_n, trades, active, monthly = run_backtest(sk, stock_bt, bm_df_bt)
             bt_results[sk] = {"pv": pv, "bm": bm_n, "trades": trades, "active": active, "monthly": monthly, "stats": calc_stats(pv, bm_n, 100_000) if pv is not None else {}}
         prog.empty()
@@ -304,13 +287,13 @@ if st.session_state.page == "perf":
 
     bt_results = st.session_state.bt_results
     st.markdown("### 📈 Strateji Performans Karşılaştırma Grafiği")
-    perf_map = {sk: (bt_results[sk]["pv"], bt_results[sk]["bm"]) for sk in ["emre", "emre_adv", "momentum"] if bt_results[sk].get("pv") is not None}
+    perf_map = {sk: (bt_results[sk]["pv"], bt_results[sk]["bm"]) for sk in ["emre", "momentum"] if bt_results[sk].get("pv") is not None}
     if perf_map:
         st.plotly_chart(build_perf_chart(perf_map, 100_000), use_container_width=True, config={"displayModeBar":False})
 
     st.markdown("### 📐 Temel Strateji İstatistikleri")
-    s1, s2, s3 = st.columns(3)
-    for col, sk in zip([s1, s2, s3], ["emre", "emre_adv", "momentum"]):
+    s1, s2 = st.columns(2)
+    for col, sk in zip([s1, s2], ["emre", "momentum"]):
         with col:
             st.markdown(f"**{STRAT_LABELS[sk]}**")
             for k, v in bt_results[sk].get("stats",{}).items():
@@ -318,46 +301,16 @@ if st.session_state.page == "perf":
 
     st.markdown("---")
     st.markdown("### 📅 Aylık Portföy Değişim Detayları")
-    t1, t2, t3 = st.tabs([STRAT_LABELS["emre"], STRAT_LABELS["emre_adv"], STRAT_LABELS["momentum"]])
-    for tab, sk in zip([t1, t2, t3], ["emre", "emre_adv", "momentum"]):
+    t1, t2 = st.tabs([STRAT_LABELS["emre"], STRAT_LABELS["momentum"]])
+    for tab, sk in zip([t1, t2], ["emre", "momentum"]):
         with tab:
             mdf = bt_results[sk].get("monthly")
             if mdf is not None and len(mdf) > 0: st.dataframe(mdf, use_container_width=True, height=400)
 
-    st.markdown("### 📋 Geçmiş İşlem Log Defteri")
-    lt1, lt2, lt3 = st.tabs([STRAT_LABELS["emre"], STRAT_LABELS["emre_adv"], STRAT_LABELS["momentum"]])
-    for tab, sk in zip([lt1, lt2, lt3], ["emre", "emre_adv", "momentum"]):
-        with tab:
-            trades = bt_results[sk].get("trades")
-            if trades is not None and len(trades) > 0: st.dataframe(trades[trades["İşlem"]=="SATIŞ"].reset_index(drop=True), use_container_width=True, height=300)
     st.stop()
 
 # ═══════════════════════════════════════════════════════════════════
-#  SAYFA: AI FINANSAL SEKRETER CHAT KATMANI (Aynı)
-# ═══════════════════════════════════════════════════════════════════
-if st.session_state.page == "ai_secretary":
-    st.markdown("## 🤖 Yapay Zeka Finansal Sekreteri")
-    if not gemini_key: st.warning("⚠️ Lütfen sol menüden API anahtarınızı giriniz.")
-    else:
-        macro_info = get_tlref_macro_regime()
-        top_stocks_context = [r['ticker'].replace(".IS","") for r in st.session_state.results if r.get('in_top5')]
-        system_prompt = f"Sen Emre'nin gelişmiş algo-trading asistanısın. Canlı durum: Faiz Rejimi={macro_info['regime']}, Sektörler={', '.join(macro_info['sectors'])}, Önerilen Top Hisseler={', '.join(top_stocks_context)}. Kısa ve profesyonel yorumlar yap. Varant konusuna kesinlikle girmek yasaktır."
-        for msg in st.session_state.ai_messages:
-            with st.chat_message(msg["role"]): st.write(msg["content"])
-        user_query = st.chat_input("Sekretere bir soru sorun...")
-        if user_query:
-            with st.chat_message("user"): st.write(user_query)
-            st.session_state.ai_messages.append({"role": "user", "content": user_query})
-            try:
-                model = genai.GenerativeModel('gemini-1.5-flash')
-                response = model.generate_content(f"{system_prompt}\n\nKullanıcı: {user_query}")
-                with st.chat_message("assistant"): st.write(response.text)
-                st.session_state.ai_messages.append({"role": "assistant", "content": response.text})
-            except Exception as e: st.error(f"Hata: {e}")
-    st.stop()
-
-# ═══════════════════════════════════════════════════════════════════
-#  SAYFA: SCANNER / TARAYICI ANA MODÜL (RESTORE EDİLDİ)
+#  SAYFA: SCANNER / TARAYICI ANA MODÜL
 # ═══════════════════════════════════════════════════════════════════
 if st.session_state.strategy is None:
     st.info("👆 Lütfen üst paneldeki butonları kullanarak çalıştırılacak strateji mimarisini seçin.")
@@ -386,7 +339,7 @@ if not st.session_state.scan_done:
     t_count = 0; s_counts = {}
     for r in results:
         sect = r['sector']
-        if t_count < 5 and (strat != "emre" and strat != "emre_adv" or s_counts.get(sect, 0) < 2):
+        if t_count < 5 and (strat != "emre" or s_counts.get(sect, 0) < 2):
             r['in_top5'] = True; s_counts[sect] = s_counts.get(sect, 0) + 1; t_count += 1
     st.session_state.update(results=results, scan_done=True); st.rerun()
 
