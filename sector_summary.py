@@ -15,11 +15,10 @@ def _sector_returns(stock_data):
             tkr = ticker.replace(".IS","")
             sect = SECTOR_MAP.get(tkr, "Diğer")
 
-            # Zaman damgasına dayalı kaymasız net getiri hesaplama altyapısı
+            # Kaymasız net yüzde getiri hesaplamaları revize edildi
             ret_1d = float(df_sorted['Close'].pct_change(1).iloc[-1] * 100)
             ret_5d = float(df_sorted['Close'].pct_change(5).iloc[-1] * 100) if len(df_sorted) >= 6 else np.nan
             ret_21d = float(df_sorted['Close'].pct_change(21).iloc[-1] * 100) if len(df_sorted) >= 22 else np.nan
-
             mom_5d = float(df_sorted['Close'].pct_change(5).iloc[-1] - df_sorted['Close'].pct_change(5).iloc[-6]) if len(df_sorted) >= 11 else 0
 
             rows.append({
@@ -30,21 +29,15 @@ def _sector_returns(stock_data):
 
     if not rows: return pd.DataFrame()
     df_all = pd.DataFrame(rows)
-    
-    # Sektör bazlı aritmetik kümeleme ortalamaları
     return df_all.groupby('sector').agg(
-        ret_1d=('ret_1d','mean'),
-        ret_5d=('ret_5d','mean'),
-        ret_21d=('ret_21d','mean'),
-        mom_5d=('mom_5d','mean'),
-        hisse_sayisi=('ticker','count')
+        ret_1d=('ret_1d','mean'), ret_5d=('ret_5d','mean'), ret_21d=('ret_21d','mean'),
+        mom_5d=('mom_5d','mean'), hisse_sayisi=('ticker','count')
     ).reset_index()
 
 def build_summary(stock_data):
     df = _sector_returns(stock_data)
     if df.empty: return {}
     df_clean = df.dropna(subset=['ret_1d', 'ret_5d', 'ret_21d'])
-
     def fmt(val): return f"{val:+.2f}%"
 
     return {
