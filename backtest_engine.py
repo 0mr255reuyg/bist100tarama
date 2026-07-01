@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from sectors import get_sector
 
+# ── İNDİKATÖRLER ─────────────────────────────────────────────────────────────
 def _sma(s, n):  return s.rolling(n).mean()
 def _ema(s, n):  return s.ewm(span=n, adjust=False).mean()
 
@@ -40,7 +41,9 @@ def _rs_at(c_s, bm, date, days=20):
     br = (float(bm_s.iloc[-1]) / float(bm_s.iloc[-days])) - 1
     return sr - br
 
+# ── GEÇMİŞ TARİH İÇİN MAKRO REJİM SİMÜLASYONU ─────────────────────────────────
 def _get_historical_macro_sectors(date):
+    # Backtest esnasında geçmiş aylardaki faiz rejim sektörlerini simüle eder
     np.random.seed(int(date.strftime('%Y%m%d')) % 100)
     regimes = [
         ["Gıda ve Perakende", "Sigorta", "Sağlık", "İletişim"],
@@ -49,6 +52,7 @@ def _get_historical_macro_sectors(date):
     ]
     return regimes[np.random.choice([0, 1, 2])]
 
+# ── KRİTER SKORU ──────────────────────────────────────────────────────────────
 def _score_at(strategy, df, bm_df, date, ticker):
     try:
         c  = df['Close'].squeeze()
@@ -58,7 +62,7 @@ def _score_at(strategy, df, bm_df, date, ticker):
         bm = bm_df['Close'].squeeze()
 
         valid = c.index[c.index <= date]
-        if len(valid) < 55: return 0, 5
+        if len(valid) < 55: return 0, 5 # Max skor 5
         c_s  = c.loc[valid]; h_s = h.loc[valid]; lo_s = lo.loc[valid]; v_s = v.loc[valid]
         price = float(c_s.iloc[-1])
 
@@ -78,6 +82,7 @@ def _score_at(strategy, df, bm_df, date, ticker):
             score = sum(checks)
             max_score = 4
             
+            # Makro Sektör Filtresi
             allowed_sectors = _get_historical_macro_sectors(date)
             is_ok = get_sector(ticker) in allowed_sectors
             if is_ok: score += 1
@@ -106,6 +111,7 @@ def _month_starts(index, start, end):
     df_tmp = pd.DataFrame({'d': dates, 'ym': [x.strftime('%Y-%m') for x in dates]})
     return list(df_tmp.groupby('ym')['d'].first())
 
+# ── ANA BACKTEST MOTORU (EŞİT AĞIRLIKLI REBALANS İLE) ─────────────────────────
 def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_n=5):
     bm = benchmark_df['Close'].squeeze()
     start_date = pd.Timestamp('2024-06-01')
@@ -123,6 +129,7 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
         port_val = cash
         current_prices = {}
         
+        # 1. Mevcut portföyün o günkü güncel değerini hesapla
         for tkr, pos in holdings.items():
             if tkr in stock_data:
                 c = stock_data[tkr]['Close'].squeeze()
@@ -132,6 +139,7 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
                 port_val += pos['shares'] * p
         pv_log.append({'date': rdate, 'value': port_val})
 
+        # 2. Yeni Ay İçin Tarama Yap
         candidates = []
         for tkr, df in stock_data.items():
             if df is None or len(df) < 25: continue
@@ -158,11 +166,13 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
 
         target_tickers = {q['ticker']: q for q in top5}
         
-        row = {'Ay': rdate.strftime('%b %Y'), 'Portföy Büyüklüğü': port_val}
+        # Aylık Özeti Kaydet
+        row = {'Ay': rdate.strftime('%b %Y'), 'Port. Değer': port_val}
         for rank, q in enumerate(top5, 1):
             row[f'#{rank}'] = f"{q['ticker'].replace('.IS','')} ({q['score']}/{q['max']})"
         monthly_rows.append(row)
 
+        # 3. Kümülatif Eşit Dağılım Hesaplaması (Örn: 150.000 / 5 = 30.000 ₺)
         alloc_per_stock = port_val / len(top5) if top5 else 0
 
         # Portföyden Çıkanları Sat
@@ -171,45 +181,30 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
                 pos = holdings[tkr]
                 sell_p = current_prices.get(tkr, pos['buy_price'])
                 pnl = (sell_p / pos['buy_price'] - 1) * 100
-                val = pos['shares'] * sell_p
-                cash += val
-                trades.append({'Ay': rdate.strftime('%b %Y'), 'Hisse': tkr.replace('.IS',''), 'İşlem Türü': '🔴 SATIŞ (Çıkış)', 'İşlem Hacmi ₺': f"{val:.2f}", 'Fiyat ₺': f"{sell_p:.2f}", 'Anlık Net K/Z': f"{pnl:+.1f}%"})
+                cash += pos['shares'] * sell_p
+                trades.append({'Ay': rdate.strftime('%b %Y'), 'Hisse': tkr.replace('.IS',''), 'İşlem': 'SATIŞ', 'Alış ₺': f"{pos['buy_price']:.2f}", 'Satış ₺': f"{sell_p:.2f}", 'P&L': f"{pnl:+.1f}%", 'Süre': f"{(rdate - pos['buy_date']).days} gün", 'Skor': f"{pos['score']}/{pos['max']}"})
                 del holdings[tkr]
 
-        # Kalanları Dengele ve Yenileri Al
+        # Kalanları Dengele (Rebalans) ve Yenileri Al
         for tkr, q in target_tickers.items():
             if tkr in holdings:
+                # Hisse devam ediyorsa lot miktarını yeni eşit hedef değere (alloc_per_stock) göre ayarla
                 pos = holdings[tkr]
-                curr_p = current_prices[tkr]
-                curr_val = pos['shares'] * curr_p
-                diff = curr_val - alloc_per_stock
-                pnl_now = (curr_p / pos['buy_price'] - 1) * 100
-                
-                if abs(diff) > 50:
-                    action = '🟠 KÂR AL (Azalt)' if diff > 0 else '🔵 EKLEME (Artır)'
-                    trade_amt = abs(diff)
-                    cash += diff
-                    
-                    if diff < 0:
-                        total_shares = alloc_per_stock / curr_p
-                        new_avg_cost = (pos['shares'] * pos['buy_price'] + trade_amt) / total_shares
-                        holdings[tkr]['buy_price'] = new_avg_cost
-                    
-                    holdings[tkr]['shares'] = alloc_per_stock / curr_p
-                    trades.append({'Ay': rdate.strftime('%b %Y'), 'Hisse': tkr.replace('.IS',''), 'İşlem Türü': action, 'İşlem Hacmi ₺': f"{trade_amt:.2f}", 'Fiyat ₺': f"{curr_p:.2f}", 'Anlık Net K/Z': f"{pnl_now:+.1f}%"})
+                current_value = pos['shares'] * current_prices[tkr]
+                holdings[tkr]['shares'] = alloc_per_stock / current_prices[tkr]
+                cash += (current_value - alloc_per_stock) # Fazlalığı nakite dön veya nakitten ekle
             else:
+                # Yeni Hisse Alımı
                 if q['price'] > 0:
                     holdings[tkr] = {'shares': alloc_per_stock / q['price'], 'buy_price': q['price'], 'buy_date': rdate, 'score': q['score'], 'max': q['max']}
                     cash -= alloc_per_stock
-                    trades.append({'Ay': rdate.strftime('%b %Y'), 'Hisse': tkr.replace('.IS',''), 'İşlem Türü': '🟢 ALIŞ (Giriş)', 'İşlem Hacmi ₺': f"{alloc_per_stock:.2f}", 'Fiyat ₺': f"{q['price']:.2f}", 'Anlık Net K/Z': '-'})
+                    trades.append({'Ay': rdate.strftime('%b %Y'), 'Hisse': tkr.replace('.IS',''), 'İşlem': 'ALIŞ', 'Alış ₺': f"{q['price']:.2f}", 'Satış ₺': '-', 'P&L': '-', 'Süre': '-', 'Skor': f"{q['score']}/{q['max']}"})
 
-    last_date = bm_idx[-1]
-    final_val = cash
-    active_now = []
+    # Son Gün Hesaplaması
+    last_date = bm_idx[-1]; final_val = cash; active_now = []
     for tkr, pos in holdings.items():
         if tkr in stock_data:
-            c = stock_data[tkr]['Close'].squeeze()
-            vd = c.index[c.index <= last_date]
+            c = stock_data[tkr]['Close'].squeeze(); vd = c.index[c.index <= last_date]
             cur_p = float(c.loc[vd[-1]]) if len(vd) else pos['buy_price']
             final_val += pos['shares'] * cur_p
             active_now.append({'ticker': tkr.replace('.IS',''), 'buy_date': pos['buy_date'].strftime('%d.%m.%Y'), 'buy_price': pos['buy_price'], 'current_price': cur_p, 'pnl_pct': (cur_p / pos['buy_price'] - 1) * 100, 'score': pos['score'], 'max': pos['max']})
@@ -217,37 +212,24 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
 
     pv_df = pd.DataFrame(pv_log).drop_duplicates('date').set_index('date')
     trades_df = pd.DataFrame(trades) if trades else pd.DataFrame()
-
     monthly_df = pd.DataFrame(monthly_rows)
     if len(monthly_df) > 1:
-        monthly_df['Aylık Değişim %'] = monthly_df['Portföy Büyüklüğü'].pct_change() * 100
-        monthly_df['Aylık Değişim %'] = monthly_df['Aylık Değişim %'].apply(lambda x: f"{x:+.1f}%" if not pd.isna(x) else '-')
-        monthly_df['Portföy Büyüklüğü'] = monthly_df['Portföy Büyüklüğü'].apply(lambda x: f"₺{x:,.0f}")
+        monthly_df['Aylık P&L'] = monthly_df['Port. Değer'].pct_change() * 100
+        monthly_df['Aylık P&L'] = monthly_df['Aylık P&L'].apply(lambda x: f"{x:+.1f}%" if not pd.isna(x) else '-')
+        monthly_df['Port. Değer'] = monthly_df['Port. Değer'].apply(lambda x: f"₺{x:,.0f}")
 
     bm_s = bm.loc[start_date:last_date]
-    if len(bm_s) > 0:
-        bm_norm = (bm_s / float(bm_s.iloc[0])) * start_capital
-    else:
-        bm_norm = None
-
-    return pv_df, bm_norm, trades_df, active_now, monthly_df
+    return pv_df, ((bm_s / float(bm_s.iloc[0])) * start_capital if len(bm_s) > 0 else None), trades_df, active_now, monthly_df
 
 def calc_stats(pv_df, bm_norm, start_capital):
     pv = pv_df['value']
     total = (pv.iloc[-1] / start_capital - 1) * 100
     n_yrs = max((pv_df.index[-1] - pv_df.index[0]).days / 365, 0.01)
-    cagr = ((pv.iloc[-1] / start_capital) ** (1/n_yrs) - 1) * 100
-    dd = (pv / pv.cummax() - 1) * 100
-    max_dd = dd.min()
-    bm_ret = (bm_norm.iloc[-1] / start_capital - 1) * 100 if bm_norm is not None else None
-    alpha = total - bm_ret if bm_ret is not None else None
+    max_dd = (pv / pv.cummax() - 1).min() * 100
+    bm_ret = (bm_norm.iloc[-1] / start_capital - 1) * 100 if bm_norm is not None else 0
     return {
-        'Toplam Getiri': f"{total:+.1f}%",
-        'CAGR': f"{cagr:+.1f}%",
-        'Max Drawdown': f"{max_dd:.1f}%",
-        'BIST100 Getirisi': f"{bm_ret:+.1f}%" if bm_ret is not None else 'N/A',
-        'Alpha': f"{alpha:+.1f}%" if alpha is not None else 'N/A',
-        'Son Değer': f"₺{pv.iloc[-1]:,.0f}"
+        'Toplam Getiri': f"{total:+.1f}%", 'CAGR': f"{((pv.iloc[-1] / start_capital) ** (1/n_yrs) - 1) * 100:+.1f}%",
+        'Max Drawdown': f"{max_dd:.1f}%", 'BIST100 Getirisi': f"{bm_ret:+.1f}%", 'Alpha': f"{total - bm_ret:+.1f}%", 'Son Değer': f"₺{pv.iloc[-1]:,.0f}"
     }
 
 STRAT_COLORS = {'emre': '#22c55e', 'momentum': '#a78bfa'}
@@ -259,17 +241,10 @@ def build_perf_chart(results_map, start_capital):
     for strat, (pv_df, bm_norm) in results_map.items():
         if pv_df is None: continue
         color = STRAT_COLORS.get(strat, '#94a3b8'); label = STRAT_LABELS.get(strat, strat)
-        pv = pv_df['value']
-        cumret = (pv / start_capital - 1) * 100
-        fig.add_trace(go.Scatter(x=pv_df.index, y=cumret, name=label, line=dict(color=color, width=2.2)), row=1, col=1)
-        dd = (pv / pv.cummax() - 1) * 100
-        fig.add_trace(go.Scatter(x=pv_df.index, y=dd, name=f"DD {label}", line=dict(color=color, width=1.2), fill='tozeroy', opacity=0.4, showlegend=False), row=2, col=1)
+        fig.add_trace(go.Scatter(x=pv_df.index, y=(pv_df['value'] / start_capital - 1) * 100, name=label, line=dict(color=color, width=2.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=pv_df.index, y=(pv_df['value'] / pv_df['value'].cummax() - 1) * 100, line=dict(color=color, width=1.2), fill='tozeroy', opacity=0.3, showlegend=False), row=2, col=1)
         if not bm_drawn and bm_norm is not None:
-            bm_ret = (bm_norm / start_capital - 1) * 100
-            fig.add_trace(go.Scatter(x=bm_norm.index, y=bm_ret, name='BIST 100', line=dict(color='#ef4444', width=2, dash='dot')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=bm_norm.index, y=(bm_norm / start_capital - 1) * 100, name='BIST 100', line=dict(color='#ef4444', width=2, dash='dot')), row=1, col=1)
             bm_drawn = True
-
-    fig.add_hline(y=0, line=dict(color='#475569', width=0.8, dash='dash'), row=1, col=1)
-    fig.add_hline(y=0, line=dict(color='#475569', width=0.6), row=2, col=1)
-    fig.update_layout(height=500, paper_bgcolor='#0d0f14', plot_bgcolor='#0d0f14', font=dict(family='JetBrains Mono', color='#94a3b8', size=11), legend=dict(orientation='h', y=1.03, x=0, bgcolor='rgba(0,0,0,0)', font=dict(size=11)), margin=dict(l=10, r=10, t=20, b=10), hovermode='x unified', yaxis=dict(ticksuffix='%', gridcolor='#1e2535'), yaxis2=dict(ticksuffix='%', gridcolor='#1e2535'), xaxis=dict(gridcolor='#1e2535'), xaxis2=dict(gridcolor='#1e2535'))
+    fig.update_layout(height=500, paper_bgcolor='#0d0f14', plot_bgcolor='#0d0f14', font=dict(family='JetBrains Mono', color='#94a3b8', size=11), margin=dict(l=10, r=10, t=20, b=10), hovermode='x unified')
     return fig
