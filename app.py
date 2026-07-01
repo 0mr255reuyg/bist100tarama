@@ -9,9 +9,10 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-# NameError riskini sıfırlamak için parametreler oturum hafızasına sabitlendi
+# NameError risklerini sıfırlayan global state tanımlama blokları
 if 'interval' not in st.session_state: st.session_state.interval = "1d"
 if 'period' not in st.session_state: st.session_state.period = "6mo"
+if 'page' not in st.session_state: st.session_state.page = "scanner"
 
 from backtest_engine import run_backtest, calc_stats, build_perf_chart, STRAT_LABELS, STRAT_COLORS
 from sectors import (get_sector, get_tlref_macro_regime, update_bist100_and_sectors,
@@ -23,6 +24,7 @@ BIST100_YF = [t+".IS" for t in BIST100_TICKERS]
 
 st.set_page_config(page_title="BIST Strateji Tarayıcı", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
 
+# CSS Yapılandırma Bloğu (Aynı şekilde korundu)
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght=400;600;700&family=JetBrains+Mono:wght=400;500&display=swap');
@@ -49,10 +51,8 @@ def fetch_data(tickers, _period, _interval):
     for i, ticker in enumerate(tickers):
         try:
             df = yf.download(ticker, period=_period, interval=_interval, auto_adjust=True, progress=False, timeout=10)
-            if df is not None and len(df) >= 22:
+            if df is not None and len(df) >= 5:
                 df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-                for col in ['Open','High','Low','Close','Volume']:
-                    if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
                 data[ticker] = df.dropna(subset=['Close'])
         except Exception: pass
         if i % 15 == 0: progress.progress(min((i+1)/len(tickers), 1.0), f"{i+1}/{len(tickers)} hisse")
@@ -63,7 +63,7 @@ def fetch_data(tickers, _period, _interval):
 def fetch_single(ticker, _period, _interval):
     try:
         df = yf.download(ticker, period=_period, interval=_interval, auto_adjust=True, progress=False, timeout=10)
-        if df is not None and len(df) > 5:
+        if df is not None and len(df) > 2:
             df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
             return df.dropna(subset=['Close'])
     except Exception: pass
@@ -77,10 +77,8 @@ def fetch_benchmark(_period, _interval):
         return df.dropna(subset=['Close'])
     return pd.DataFrame()
 
-# İndikatör Kısa İskelet Tanımları
+# İndikatör Kırılımları
 def _c(df): return df['Close'].squeeze().dropna()
-def _h(df): return df['High'].squeeze().dropna()
-def _l(df): return df['Low'].squeeze().dropna()
 def _v(df): return df['Volume'].squeeze().dropna()
 def sma(s, n): return s.rolling(n).mean()
 def rsi_calc(s, n=14):
@@ -88,11 +86,12 @@ def rsi_calc(s, n=14):
     return (100 - 100/(1+g/l.replace(0, np.nan))).fillna(50)
 def rs_score(c, bm_c, days=20):
     common = c.index.intersection(bm_c.index)
+    if len(common) < days: return 0.0
     return (float(c.loc[common].iloc[-1]/c.loc[common].iloc[-days]) - 1) - (float(bm_c.loc[common].iloc[-1]/bm_c.loc[common].iloc[-days]) - 1)
 
 def score_emre(df, bm_df, ticker):
     try:
-        c = _c(df); bm = _c(bm_df); price = float(c.iloc[-1]); s20 = float(sma(c,20).iloc[-1]); s50 = float(sma(c,50).iloc[-1]); rsi_v = float(rsi_calc(c).iloc[-1]); rs = rs_score(c, bm, 20); vr = float(_v(df).iloc[-1]) / float(_v(df).iloc[-21:-1].mean())
+        c = _c(df); bm = _c(bm_df); price = float(c.iloc[-1]); s20 = float(sma(c,20).iloc[-1]); s50 = float(sma(c,50).iloc[-1]); rsi_v = float(rsi_calc(c).iloc[-1]); rs = rs_score(c, bm, 20); vr = float(_v(df).iloc[-1]) / max(float(_v(df).iloc[-21:-1].mean()), 1.0)
         criteria = {
             "RS Pozitif (20g vs BIST)": (not np.isnan(rs) and rs > 0, f"{rs*100:.1f}%"),
             "SMA20 & SMA50 Üstünde": (price > s20 and price > s50, f"{price:.2f} > {s20:.2f}"),
@@ -110,7 +109,7 @@ def score_emre(df, bm_df, ticker):
 
 STRATEGY_FN = {
     "emre": (lambda df, bm: score_emre(df, bm, st.session_state.get('active_scanning_ticker', '')), "Emre'nin Makro Stratejisi"),
-    "momentum": (lambda df, bm: (1, 1, {"Teknik Filtre": (True, "Aktif")}, {})), "Momentum Kırılımcısı"
+    "momentum": (lambda df, bm: (1, 4, {"Momentum Kriteri": (True, "Aktif")}, {})), "Momentum Kırılımcısı"
 }
 
 def build_chart(df, ticker, strategy, interval):
@@ -126,7 +125,7 @@ def build_tlref_chart(df):
     fig.add_trace(go.Scatter(x=df.index, y=df['ADX'], name='ADX Şiddet', line=dict(color='#a78bfa', width=2)), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['D+'], name='D+ (Alıcı İvme)', line=dict(color='#22c55e', width=2.2)), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['D-'], name='D- (Satıcı İvme)', line=dict(color='#ef4444', width=2.2)), row=2, col=1)
-    fig.update_layout(height=380, paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14")
+    fig.update_layout(height=380, paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14", font=dict(family="JetBrains Mono"))
     return fig
 
 def render_detail(result, strategy, interval):
@@ -136,21 +135,16 @@ def render_detail(result, strategy, interval):
         icon="✅" if passed else "❌"; col="pass" if passed else "fail"
         (c1 if i%2==0 else c2).markdown(f'<div class="mc"><div class="ml">{k}</div><div class="mv {col}">{icon} {val}</div></div>', unsafe_allow_html=True)
 
-# ── SIDEBAR PANEL AKIŞI ───────────────────────────────────────────────────────
+# ── SIDEBAR SEÇENEKLERİ ───────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### ⚙️ Ayarlar")
-    sel_int = st.selectbox("Zaman Dilimi", ["1d","4h","1wk"], format_func=lambda x: {"1d":"Günlük (1D)","4h":"4 Saatlik (4H)","1wk":"Haftalık (1W)"}[x])
-    st.session_state.interval = sel_int
-    st.session_state.period = {"1d":"6mo","4h":"60d","1wk":"2y"}[sel_int]
-    
-    st.markdown("---")
+    st.markdown("### ⚙️ Menü")
     if st.button("🏭 Sektör Özeti Genel Pano", use_container_width=True): st.session_state.page = "sektor"; st.rerun()
     if st.button("📈 TLREF Canlı Faiz Analizi", use_container_width=True): st.session_state.page = "tlref_page"; st.rerun()
     if st.button("📊 Kar/Zarar Performans Paneli", use_container_width=True): st.session_state.page = "perf"; st.rerun()
     
     st.markdown("---")
     st.markdown("### 🔍 Tekli Hisse Arama")
-    search_input = st.text_input("Hisse Kodu", placeholder="THYAO...").upper().strip()
+    search_input = st.text_input("Hisse Kodu", placeholder="GARAN...").upper().strip()
     if st.button("Hisse Detay Analiz Et", use_container_width=True):
         if search_input: st.session_state.page = "search"; st.session_state.search_ticker = search_input; st.rerun()
 
@@ -160,60 +154,80 @@ with st.sidebar:
     if st.button("Seçili Temayı Tara", use_container_width=True):
         if chosen_theme != "—": st.session_state.page = "manual_macro_page"; st.session_state.chosen_theme_name = chosen_theme; st.rerun()
 
-# Üst Strateji Seçenekleri
 col1, col2 = st.columns(2)
 with col1:
     if st.button("🟢 Emre'nin Makro Stratejisi", use_container_width=True, type="primary"): st.session_state.update(strategy="emre", page="scanner", scan_done=False); st.rerun()
 with col2:
     if st.button("🟣 Momentum Kırılımcısı", use_container_width=True): st.session_state.update(strategy="momentum", page="scanner", scan_done=False); st.rerun()
 
-# ── SAYFA DALLANMALARI ────────────────────────────────────────────────────────
+# ── SAYFA YÖNLENDİRME AKIŞLARI ────────────────────────────────────────────────
 if st.session_state.page == "tlref_page":
     st.markdown("## 📊 Canlı Makroekonomik Faiz Motoru (TLREF)")
     macro = get_tlref_macro_regime()
+    mc1, mc2 = st.columns([1.5, 2.5])
+    with mc1: st.markdown(f'<div class="mc" style="border-left: 5px solid #a78bfa;"><div class="ml">Mevcut Faiz Rejimi</div><div class="mv" style="font-size:1.3rem; color:#a78bfa;">{macro["regime"]}</div><div style="font-size:0.75rem; color:#64748b; margin-top:5px;">Anlık Oran: %{macro["current_rate"]:.2f}</div></div>', unsafe_allow_html=True)
+    with mc2: st.markdown(f'<div class="mc" style="border-left: 5px solid #22c55e;"><div class="ml">Desteklenen Sektörler</div><div class="mv" style="font-size:0.95rem; color:#22c55e;">{" · ".join(macro["sectors"])}</div></div>', unsafe_allow_html=True)
     st.plotly_chart(build_tlref_chart(macro["df"]), use_container_width=True)
+    
     st.markdown("### 🏭 Rejimin Olumlu Etkilediği Sektörün Hisse Listesi")
-    with st.spinner("Sektör hisseleri taranıyor..."): stock_s = fetch_data(BIST100_YF, "5d", "1d")
+    with st.spinner("Hisseler getiriliyor..."): stock_s = fetch_data(BIST100_YF, "5d", "1d")
     list_rows = []
     for tkr, df in stock_s.items():
         if get_sector(tkr) in macro["sectors"] and df is not None and len(df) >= 2:
             c = df['Close'].squeeze()
             list_rows.append({"Hisse": tkr.replace(".IS",""), "Sektör": get_sector(tkr), "Son Fiyat": f"{c.iloc[-1]:.2f} ₺", "Günlük Değişim %": (c.iloc[-1]/c.iloc[-2]-1)*100})
-    if list_rows: st.dataframe(pd.DataFrame(list_rows), use_container_width=True)
+    if list_rows: st.dataframe(pd.DataFrame(list_rows), use_container_width=True, height=400)
     st.stop()
 
 if st.session_state.page == "sektor":
     st.markdown("### 📈 BIST 100 Endeks Doğrulanmış Genel Performansı")
-    xu100 = fetch_benchmark(st.session_state.period, st.session_state.interval)
+    xu100 = fetch_benchmark(st.session_state.period, st.session_state.get('interval', '1d'))
     if not xu100.empty:
         c_xu = xu100['Close'].squeeze(); r1d = (c_xu.iloc[-1]/c_xu.iloc[-2]-1)*100
-        st.metric("BIST 100 Son Kapanış", f"{c_xu.iloc[-1]:.2f}", f"{r1d:+.2f}%")
-    with st.spinner("Hesaplanıyor..."): stock_s = fetch_data(BIST100_YF, "3mo", "1d")
+        st.metric("BIST 100 Endeksi", f"{c_xu.iloc[-1]:.2f}", f"{r1d:+.2f}%")
+    with st.spinner("Sektör getirileri hesaplanıyor..."): stock_s = fetch_data(BIST100_YF, "3mo", "1d")
     summary = build_summary(stock_s)
     st.stop()
 
 if st.session_state.page == "perf":
     st.markdown("## 📊 Geçmiş Dönem Performans & Kâr Alma Defteri")
     if st.button("▶️ Eşit Ağırlıklı Rebalans Simülasyonunu Çalıştır", use_container_width=True):
-        bm_df_bt = fetch_benchmark("2y", "1d"); stock_bt = fetch_data(BIST100_YF, "2y", "1d")
-        btr = {}
-        for sk in ["emre", "momentum"]:
-            pv, bn, trd, act, mnt = run_backtest(sk, stock_bt, bm_df_bt)
-            btr[sk] = {"pv": pv, "bm": bn, "trades": trd, "monthly": mnt, "stats": calc_stats(pv, bn, 100_000) if pv is not None else {}}
-        st.session_state.bt_results = btr; st.session_state.bt_done = True
-    if st.session_state.bt_done:
-        st.dataframe(st.session_state.bt_results["emre"]["trades"], use_container_width=True)
+        with st.spinner("Backtest hesaplanıyor..."):
+            bm_df_bt = fetch_benchmark("2y", "1d"); stock_bt = fetch_data(BIST100_YF, "2y", "1d")
+            btr = {}
+            for sk in ["emre", "momentum"]:
+                pv, bn, trd, act, mnt = run_backtest(sk, stock_bt, bm_df_bt)
+                btr[sk] = {"pv": pv, "bm": bn, "trades": trd, "monthly": mnt}
+            st.session_state.bt_results = btr; st.session_state.bt_done = True
+    if st.session_state.get('bt_done'):
+        st.markdown("**Aylık Tüm İşlem Hareketleri (Alış, Satış, Ekleme, Kâr Al):**")
+        st.dataframe(st.session_state.bt_results["emre"]["trades"], use_container_width=True, height=450)
     st.stop()
 
 if st.session_state.page == "search":
     tk_q = st.session_state.get("search_ticker","").replace(".IS","")
-    st.markdown(f"## 🔍 {tk_q} — Teknik & Makro Analiz Paneli")
-    df_s = fetch_single(tk_q+".IS", "6mo", st.session_state.interval)
-    bm_df = fetch_benchmark("6mo", st.session_state.interval)
+    st.markdown(f"## 🔍 {tk_q} — Analiz Paneli")
+    df_s = fetch_single(tk_q+".IS", "6mo", st.session_state.get('interval', '1d'))
+    bm_df = fetch_benchmark("6mo", st.session_state.get('interval', '1d'))
     if df_s is not None:
         st.session_state['active_scanning_ticker'] = tk_q+".IS"
         sc, mx, crit, _ = score_emre(df_s, bm_df, tk_q+".IS")
-        st.write(f"Skor: {sc}/{mx}")
+        st.write(f"Emre Makro Skoru: {sc}/{mx}")
+    else: st.error("Hisse verisi çekilemedi.")
+    st.stop()
+
+if st.session_state.page == "manual_macro_page":
+    tname = st.session_state.get("chosen_theme_name","")
+    tinfo = MANUAL_MACRO_THEMES[tname]
+    st.markdown(f"## {tname}")
+    theme_tickers = [t+".IS" for t,s in SECTOR_MAP.items() if s in tinfo["sektörler"]]
+    bm_df = fetch_benchmark("6mo","1d"); td = fetch_data(theme_tickers,"6mo","1d")
+    m_rows = []
+    for ticker, df in td.items():
+        if df is None or len(df) < 22: continue
+        sc, mx, _, _ = score_emre(df, bm_df, ticker)
+        m_rows.append({"Hisse": ticker.replace(".IS",""), "Sektör": get_sector(ticker), "Teknik Puan": f"{sc}/{mx}"})
+    if m_rows: st.dataframe(pd.DataFrame(m_rows), use_container_width=True)
     st.stop()
 
 # ── TARAYICI ANA AKIŞ ─────────────────────────────────────────────────────────
@@ -239,7 +253,6 @@ if not st.session_state.scan_done:
         if tc < 5 and (strat != "emre" or scnt.get(s, 0) < 2): r['in_top5'] = True; scnt[s] = scnt.get(s,0)+1; tc+=1
     st.session_state.update(results=res, scan_done=True); st.rerun()
 
-# Dağılım Listesi
 top5 = [r for r in st.session_state.results if r.get('in_top5')]
 l, r = st.columns([1, 2.4], gap="large")
 with l:
