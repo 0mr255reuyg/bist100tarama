@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import requests
+import borsapy as bp
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
@@ -87,42 +87,59 @@ def fetch_benchmark(period, interval):
 
 # ── 2b. TLREF (TCMB EVDS) ─────────────────────────────────────────────────────
 # TLREF, BIST'i doğrudan etkileyen TL referans faizidir. yfinance üzerinde
-# bulunmadığı için TCMB'nin EVDS servisinden (ücretsiz API anahtarı ile)
-# günlük TP.TLREF.O serisi çekilir ve haftalık mum (OHLC) formatına çevrilir.
+# bulunmadığı için TCMB'nin EVDS v3 REST servisinden borsapy sarmalayıcısı
+# ile çekilir. TLREF'in gerçek günlük Düşük/Yüksek/Kapanış serileri
+# (TP.BISTTLREF.DUSUK/YUKSEK/KAPANIS) kullanılır ve haftalık muma çevrilir.
+# NOT: TCMB, EVDS'yi 2025 sonunda evds3.tcmb.gov.tr'ye taşıdı ve eski
+# evds2.tcmb.gov.tr/service/evds/?key=... adresini tamamen kapattı; bu yüzden
+# ham HTTP isteği yerine bunu güncel tutan borsapy kullanılıyor.
 # API anahtarı yoksa/erişim başarısız olursa ^TNX (ABD 10Y tahvil) yön-fikri
 # proxy'sine düşülür ve kullanıcıya bu açıkça bildirilir.
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_tlref_daily(api_key, years_back=3):
-    """TCMB EVDS'den günlük TLREF (TP.TLREF.O) serisini çeker."""
+def fetch_tlref_daily_ohlc(api_key, years_back=3):
+    """TCMB EVDS'den TLREF'in günlük Düşük/Yüksek/Kapanış serilerini çeker."""
     if not api_key:
-        return pd.Series(dtype=float)
-    start_date = (datetime.now() - pd.DateOffset(years=years_back)).strftime("%d-%m-%Y")
-    end_date = datetime.now().strftime("%d-%m-%Y")
-    url = (
-        "https://evds2.tcmb.gov.tr/service/evds/series=TP.TLREF.O"
-        f"&startDate={start_date}&endDate={end_date}&type=json&key={api_key}"
-    )
-    try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        items = r.json().get("items", [])
-        if not items:
-            return pd.Series(dtype=float)
-        df = pd.DataFrame(items)
-        df["Tarih"] = pd.to_datetime(df["Tarih"], format="%d-%m-%Y")
-        df["Value"] = pd.to_numeric(df.get("TP_TLREF_O"), errors="coerce")
-        df = df.dropna(subset=["Value"]).set_index("Tarih").sort_index()
-        return df["Value"]
-    except Exception:
-        return pd.Series(dtype=float)
-
-def _weekly_ohlc_from_series(s):
-    """Günlük bir oran serisinden haftalık sentetik OHLC (mum) üretir."""
-    if s is None or s.empty:
         return pd.DataFrame()
-    w = s.resample("W-FRI").agg(["first", "max", "min", "last"])
-    w.columns = ["Open", "High", "Low", "Close"]
+    try:
+        bp.set_evds_key(api_key)
+        start = (datetime.now() - pd.DateOffset(years=years_back)).strftime("%Y-%m-%d")
+        end = datetime.now().strftime("%Y-%m-%d")
+        df = bp.evds_download(
+            ["TP.BISTTLREF.DUSUK", "TP.BISTTLREF.YUKSEK", "TP.BISTTLREF.KAPANIS"],
+            start=start, end=end, frequency="daily",
+        )
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.rename(columns={
+            "TP.BISTTLREF.DUSUK": "Low",
+            "TP.BISTTLREF.YUKSEK": "High",
+            "TP.BISTTLREF.KAPANIS": "Close",
+        })
+        for col in ["Low", "High", "Close"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        df.index = pd.to_datetime(df.index)
+        df = df.dropna(subset=["Close"]).sort_index()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+def _weekly_ohlc_from_daily_hlc(df):
+    """Günlük Düşük/Yüksek/Kapanış verisinden haftalık mum üretir.
+    'Açılış' serisi EVDS'de olmadığından, haftanın ilk günkü kapanışı
+    Open olarak kullanılır (High/Low gerçek günlük değerlerden alınır)."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    close_agg = df["Close"].resample("W-FRI").agg(["first", "last"])
+    high_col = df["High"] if "High" in df.columns else df["Close"]
+    low_col = df["Low"] if "Low" in df.columns else df["Close"]
+    w = pd.DataFrame({
+        "Open": close_agg["first"],
+        "High": high_col.resample("W-FRI").max(),
+        "Low": low_col.resample("W-FRI").min(),
+        "Close": close_agg["last"],
+    })
     return w.dropna()
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -137,8 +154,8 @@ def fetch_macro_rate_fallback():
 
 def get_tlref_weekly(api_key):
     """Haftalık TLREF OHLC verisini + kaynağını döndürür. Öncelik gerçek TLREF'te."""
-    daily = fetch_tlref_daily(api_key)
-    weekly = _weekly_ohlc_from_series(daily)
+    daily = fetch_tlref_daily_ohlc(api_key)
+    weekly = _weekly_ohlc_from_daily_hlc(daily)
     if len(weekly) >= 55:
         return weekly, "TLREF (TCMB EVDS)"
     fb = fetch_macro_rate_fallback()
