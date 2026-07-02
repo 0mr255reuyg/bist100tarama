@@ -27,7 +27,6 @@ def _sector_returns(stock_data):
             tkr  = ticker.replace(".IS","")
             sect = SECTOR_MAP.get(tkr, "Diğer")
 
-            # Sıfıra bölünme hatalarını engellemek için güvenlik kontrolleri
             if float(c.iloc[-2]) == 0 or float(c.iloc[-6]) == 0 or float(c.iloc[-22]) == 0:
                 continue
 
@@ -35,7 +34,6 @@ def _sector_returns(stock_data):
             ret_5d  = (float(c.iloc[-1]) / float(c.iloc[-6])  - 1) * 100
             ret_21d = (float(c.iloc[-1]) / float(c.iloc[-22]) - 1) * 100
 
-            # Momentum hesaplamaları (Önceki döneme göre ivme farkı)
             mom_5d_prev = (float(c.iloc[-6]) / float(c.iloc[-11]) - 1) * 100 if float(c.iloc[-11]) != 0 else 0
             mom_5d  = ret_5d - mom_5d_prev
 
@@ -55,7 +53,6 @@ def _sector_returns(stock_data):
 
     df_all = pd.DataFrame(rows)
     
-    # Sektörel ortalamaları hesapla
     sect_df = df_all.groupby('sector').agg(
         ret_1d=('ret_1d','mean'),
         ret_5d=('ret_5d','mean'),
@@ -110,7 +107,6 @@ def build_sector_bar_chart(stock_data):
 
     fig = go.Figure()
     
-    # Premium renk kodları: Yeşil (#10b981) ve Kırmızı (#ef4444)
     marker_colors = ['#10b981' if v >= 0 else '#ef4444' for v in df['ret_1d']]
     
     fig.add_trace(go.Bar(
@@ -139,6 +135,6 @@ def build_sector_bar_chart(stock_data):
         barmode='overlay',
         xaxis=dict(ticksuffix='%', gridcolor='#1e1e1e', zeroline=True, zerolinecolor='#333', zerolinewidth=1),
         yaxis=dict(gridcolor='#1e1e1e'),
-        title=dict(text='Sektör Getirileri', font=dict(color='#ffffff', size=14, weight="bold"), x=0.01),
+        title=dict(text='Sektör Getirileri', font=dict(color='#ffffff', size=14), x=0.01),
     )
     return fig
