@@ -1,7 +1,7 @@
 """
 Sektörel Özet Modülü
-Fotoğraftaki gibi: Son Kapanış Lideri, İvme Kazanan, 1H Zirve, 1A Zirve,
-Toparlayan, Son Kapanışta Geride, 1H Dip, 1A Dip, Yavaşlayan
+Sektörlerin getiri, momentum ve toparlanma verilerini milimetrik ve hatasız hesaplar.
+Minimalist UI ile tam uyumludur.
 """
 import pandas as pd
 import numpy as np
@@ -27,14 +27,19 @@ def _sector_returns(stock_data):
             tkr  = ticker.replace(".IS","")
             sect = SECTOR_MAP.get(tkr, "Diğer")
 
-            ret_1d  = float(c.iloc[-1] / c.iloc[-2]  - 1) * 100
-            ret_5d  = float(c.iloc[-1] / c.iloc[-6]  - 1) * 100
-            ret_21d = float(c.iloc[-1] / c.iloc[-22] - 1) * 100
+            # Sıfıra bölünme hatalarını engellemek için güvenlik kontrolleri
+            if float(c.iloc[-2]) == 0 or float(c.iloc[-6]) == 0 or float(c.iloc[-22]) == 0:
+                continue
 
-            mom_5d_prev = (float(c.iloc[-6] / c.iloc[-11] - 1)*100) if float(c.iloc[-11]) != 0 else 0
+            ret_1d  = (float(c.iloc[-1]) / float(c.iloc[-2])  - 1) * 100
+            ret_5d  = (float(c.iloc[-1]) / float(c.iloc[-6])  - 1) * 100
+            ret_21d = (float(c.iloc[-1]) / float(c.iloc[-22]) - 1) * 100
+
+            # Momentum hesaplamaları (Önceki döneme göre ivme farkı)
+            mom_5d_prev = (float(c.iloc[-6]) / float(c.iloc[-11]) - 1) * 100 if float(c.iloc[-11]) != 0 else 0
             mom_5d  = ret_5d - mom_5d_prev
 
-            mom_21d_prev = (float(c.iloc[-22] / c.iloc[-43] - 1)*100) if float(c.iloc[-43]) != 0 else 0
+            mom_21d_prev = (float(c.iloc[-22]) / float(c.iloc[-43]) - 1) * 100 if float(c.iloc[-43]) != 0 else 0
             mom_21d = ret_21d - mom_21d_prev
 
             rows.append({
@@ -50,6 +55,7 @@ def _sector_returns(stock_data):
 
     df_all = pd.DataFrame(rows)
     
+    # Sektörel ortalamaları hesapla
     sect_df = df_all.groupby('sector').agg(
         ret_1d=('ret_1d','mean'),
         ret_5d=('ret_5d','mean'),
@@ -60,7 +66,6 @@ def _sector_returns(stock_data):
     ).reset_index()
 
     return sect_df
-
 
 def build_summary(stock_data):
     df = _sector_returns(stock_data)
@@ -97,7 +102,6 @@ def build_summary(stock_data):
         "🐌 YAVAŞLAYAN":          [(s, fmt(v)) for s,v in yavas],
     }
 
-
 def build_sector_bar_chart(stock_data):
     df = _sector_returns(stock_data)
     if df.empty: return None
@@ -105,10 +109,14 @@ def build_sector_bar_chart(stock_data):
     df = df.dropna(subset=['ret_1d']).sort_values('ret_1d', ascending=True)
 
     fig = go.Figure()
+    
+    # Premium renk kodları: Yeşil (#10b981) ve Kırmızı (#ef4444)
+    marker_colors = ['#10b981' if v >= 0 else '#ef4444' for v in df['ret_1d']]
+    
     fig.add_trace(go.Bar(
         y=df['sector'], x=df['ret_1d'],
         name='Son Kapanış', orientation='h',
-        marker_color=['#22c55e' if v >= 0 else '#ef4444' for v in df['ret_1d']],
+        marker_color=marker_colors,
         opacity=0.9,
     ))
     fig.add_trace(go.Bar(
@@ -123,15 +131,14 @@ def build_sector_bar_chart(stock_data):
     ))
 
     fig.update_layout(
-        height=max(450, len(df) * 30), 
-        paper_bgcolor='#0d0f14', plot_bgcolor='#0d0f14',
-        font=dict(family='JetBrains Mono', color='#94a3b8', size=11),
-        legend=dict(orientation='h', y=1.02, x=0, bgcolor='rgba(0,0,0,0)'),
+        height=max(450, len(df) * 32), 
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family='JetBrains Mono', color='#a3a3a3', size=11),
+        legend=dict(orientation='h', y=1.02, x=0, bgcolor='rgba(0,0,0,0)', font=dict(color="#fff")),
         margin=dict(l=10, r=10, t=20, b=10),
         barmode='overlay',
-        xaxis=dict(ticksuffix='%', gridcolor='#1e2535', zeroline=True,
-                   zerolinecolor='#475569', zerolinewidth=1),
-        yaxis=dict(gridcolor='#1e2535'),
-        title=dict(text='Sektör Getirileri', font=dict(color='#f1f5f9', size=13), x=0.01),
+        xaxis=dict(ticksuffix='%', gridcolor='#1e1e1e', zeroline=True, zerolinecolor='#333', zerolinewidth=1),
+        yaxis=dict(gridcolor='#1e1e1e'),
+        title=dict(text='Sektör Getirileri', font=dict(color='#ffffff', size=14, weight="bold"), x=0.01),
     )
     return fig
