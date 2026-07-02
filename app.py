@@ -638,12 +638,15 @@ elif st.session_state.page == "perf":
         with st.spinner("2 yıllık veri çekiliyor ve simülasyon hesaplanıyor..."):
             bm_df_bt = fetch_benchmark("2y","1d")
             stock_bt = fetch_data(BIST100_YF,"2y","1d")
-        
+            tlref_bt, tlref_bt_source = get_tlref_weekly(st.session_state["evds_key"])
+
+        st.caption(f"Makro rüzgar kriteri için kullanılan faiz kaynağı: **{tlref_bt_source}**")
+
         bt_results={}
         prog=st.progress(0)
         for i,sk in enumerate(["emre","momentum"]):
             prog.progress((i+1)/2, text=f"{STRATEGY_FN[sk][1]} hesaplanıyor...")
-            pv,bm_n,trades,active,monthly = run_backtest(sk,stock_bt,bm_df_bt)
+            pv,bm_n,trades,active,monthly = run_backtest(sk,stock_bt,bm_df_bt,tlref_weekly=tlref_bt)
             bt_results[sk] = {"pv":pv,"bm":bm_n,"trades":trades,"active":active,"monthly":monthly, "stats":calc_stats(pv,bm_n,100_000) if pv is not None else {}}
         prog.empty()
         st.session_state.bt_results = bt_results
