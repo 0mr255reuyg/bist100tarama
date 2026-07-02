@@ -44,15 +44,63 @@ def _month_starts(index, start, end):
     df_tmp = pd.DataFrame({'d': dates, 'ym': [x.strftime('%Y-%m') for x in dates]})
     return list(df_tmp.groupby('ym')['d'].first())
 
+# ── 1b. TARİHSEL TLREF MAKRO REJİMİ ───────────────────────────────────────────
+# app.py'deki canlı get_macro_regime() ile AYNI mantık (SMA8/54, ADX, D+/D-,
+# Plato tespiti); burada geçmişteki her rebalans tarihi için ayrı ayrı
+# hesaplanır ki backtest, canlı stratejiyle tutarlı bir "makro rüzgar" kriteri
+# kullansın. tlref_weekly verilmezse (ör. EVDS API key yoksa) None döner ve
+# _score_at basit fiyat-trend proxy'sine düşer.
+_REGIME_SECTOR_MAP = {
+    "risk_off": ["Gıda ve Perakende", "İletişim", "Sağlık"],
+    "risk_on":  ["Teknoloji ve Yazılım", "Enerji", "Otomotiv", "Sanayi ve Kimya"],
+    "plato":    ["İnşaat ve GMYO", "İnşaat Malzemeleri", "Ulaşım ve Turizm"],
+}
+
+def _calc_adx_hist(h, l, c, n=14):
+    up = h.diff(); down = -l.diff()
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    tr = pd.concat([(h-l), (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(span=n, adjust=False).mean()
+    plus_di = 100 * (pd.Series(plus_dm, index=h.index).ewm(span=n, adjust=False).mean() / atr)
+    minus_di = 100 * (pd.Series(minus_dm, index=h.index).ewm(span=n, adjust=False).mean() / atr)
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan))
+    adx = dx.ewm(span=n, adjust=False).mean()
+    return adx, plus_di, minus_di
+
+def _regime_sectors_at(tlref_weekly, date):
+    """Belirli bir geçmiş tarihte (o tarihe kadarki veriyle) hangi rejimin
+    aktif olduğunu hesaplayıp o rejimin olumlu sektörlerini döndürür."""
+    if tlref_weekly is None or tlref_weekly.empty:
+        return None
+    df_v = tlref_weekly.loc[tlref_weekly.index <= date]
+    if len(df_v) < 55:
+        return None
+    c = df_v['Close'].squeeze(); h = df_v['High'].squeeze(); l = df_v['Low'].squeeze()
+    sma8 = float(c.rolling(8).mean().iloc[-1])
+    sma54 = float(c.rolling(54).mean().iloc[-1])
+    adx, plus_di, minus_di = _calc_adx_hist(h, l, c)
+    adx_val = float(adx.iloc[-1]); p_di = float(plus_di.iloc[-1]); m_di = float(minus_di.iloc[-1])
+    spread_pct = abs(sma8 - sma54) / sma54 * 100 if sma54 else 0.0
+    is_plato = spread_pct < 3 and adx_val < 20
+
+    if is_plato:
+        return _REGIME_SECTOR_MAP["plato"]
+    elif sma8 > sma54 and p_di > m_di and adx_val >= 20:
+        return _REGIME_SECTOR_MAP["risk_off"]
+    elif sma8 < sma54 and m_di > p_di and adx_val >= 20:
+        return _REGIME_SECTOR_MAP["risk_on"]
+    return _REGIME_SECTOR_MAP["plato"]
+
 # ── 2. KRİTER SKORU (GEÇMİŞ TARİH İÇİN) ───────────────────────────────────────
-def _score_at(strategy, df, bm_df, date):
+def _score_at(strategy, df, bm_df, date, ticker=None, regime_sectors=None):
     try:
         c = df['Close'].squeeze(); h = df['High'].squeeze()
         lo = df['Low'].squeeze(); v = df['Volume'].squeeze()
         bm = bm_df['Close'].squeeze()
 
         valid = c.index[c.index <= date]
-        if len(valid) < 55: return 0, 5
+        if len(valid) < 55: return (0, 4) if strategy == "momentum" else (0, 5)
         c_s = c.loc[valid]; h_s = h.loc[valid]
         lo_s = lo.loc[valid]; v_s = v.loc[valid]
         price = float(c_s.iloc[-1])
@@ -63,10 +111,13 @@ def _score_at(strategy, df, bm_df, date):
             s50 = float(_sma(c_s, 50).iloc[-1])
             rsi_v = float(_rsi(c_s).iloc[-1])
             rs = _rs_at(c_s, bm, date, days=20)
-            
-            # Backtest için basitleştirilmiş geçmiş makro proxy'si (Trend ağırlıklı)
-            # Gerçekte makro rejim geçmiş datayla hesaplanmalı, burada teknik gücü test ediyoruz
-            macro_bonus = 1 if price > s50 else 0 
+
+            if regime_sectors is not None and ticker is not None:
+                # Canlı stratejiyle tutarlı: gerçek TLREF rejimine göre sektör hizalaması
+                macro_bonus = 1 if get_sector(ticker) in regime_sectors else 0
+            else:
+                # TLREF verisi yoksa (ör. EVDS key girilmemiş) basit fiyat-trend proxy'si
+                macro_bonus = 1 if price > s50 else 0
 
             checks = [
                 (rs is not None) and (not np.isnan(rs)) and rs > 0,
@@ -92,11 +143,12 @@ def _score_at(strategy, df, bm_df, date):
             ]
             return sum(checks), 4
 
-    except: pass
-    return 0, 5
+    except Exception:
+        pass
+    return (0, 4) if strategy == "momentum" else (0, 5)
 
 # ── 3. ANA BACKTEST MOTORU (REBALANS & LOG DEFTERİ) ───────────────────────────
-def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_n=5):
+def run_backtest(strategy, stock_data, benchmark_df, tlref_weekly=None, start_capital=100_000, top_n=5):
     bm = benchmark_df['Close'].squeeze()
     start_date = pd.Timestamp('2024-06-01')
     end_date   = pd.Timestamp(bm.index[-1])
@@ -122,11 +174,14 @@ def run_backtest(strategy, stock_data, benchmark_df, start_capital=100_000, top_
                 if len(vd): port_val += pos['shares'] * float(c.loc[vd[-1]])
         pv_log.append({'date': rdate, 'value': port_val})
 
+        # 1b. Bu rebalans tarihindeki TLREF makro rejimi (tüm hisseler için ortak)
+        regime_sectors = _regime_sectors_at(tlref_weekly, rdate)
+
         # 2. Hisse Havuzunu Tara ve Puanla
         candidates = []
         for tkr, df in stock_data.items():
             if df is None or len(df) < 55: continue
-            sc, mx = _score_at(strategy, df, benchmark_df, rdate)
+            sc, mx = _score_at(strategy, df, benchmark_df, rdate, ticker=tkr, regime_sectors=regime_sectors)
             c = df['Close'].squeeze()
             vd = c.index[c.index <= rdate]
             if len(vd):
