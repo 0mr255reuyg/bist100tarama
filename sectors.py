@@ -1,13 +1,17 @@
 """
 sectors.py
-Canlı BIST 100 çekme motoru ve Makro Tema eşleştirmeleri.
-Bağlantı koparsa fallback (yedek) listeyi kullanır.
+BIST 100 bileşen listesi ve Makro Tema eşleştirmeleri.
+NOT: get_live_bist100_and_sectors() şu an her zaman statik FALLBACK_SECTOR_MAP'i
+döndürüyor — henüz gerçek bir canlı kaynağa bağlı değil. "canlı" isimlendirmesi
+ileride gerçek bir çekim eklenirse anlamlı olsun diye bırakıldı; şu an yanıltıcı
+olmaması için burada açıkça belirtiliyor.
 """
 import requests
 from bs4 import BeautifulSoup
 import streamlit as st
 
-# 1. YEDEK LİSTE (FALLBACK) - Sistem canlı veriye ulaşamazsa burayı kullanır
+# 1. YEDEK LİSTE (FALLBACK) - Sistem canlı veriye ulaşamazsa (ya da henüz canlı
+#    kaynak bağlanmadığı için her zaman) burayı kullanır
 FALLBACK_SECTOR_MAP = {
     "AKBNK": "Banka", "GARAN": "Banka", "ISCTR": "Banka", "YKBNK": "Banka",
     "HALKB": "Banka", "VAKBN": "Banka", "TSKB": "Banka", "SKBNK": "Banka",
@@ -21,6 +25,7 @@ FALLBACK_SECTOR_MAP = {
     "AKSEN": "Enerji", "ENJSA": "Enerji", "ASTOR": "Enerji", "GESAN": "Enerji", 
     "EUPWR": "Enerji", "CWENE": "Enerji", "ALFAS": "Enerji", "SMRTG": "Enerji", 
     "ZOREN": "Enerji", "CANTE": "Enerji", "ODAS": "Enerji", "GWIND": "Enerji",
+    "TUPRS": "Enerji",
     "BIMAS": "Gıda ve Perakende", "MGROS": "Gıda ve Perakende", "SOKM": "Gıda ve Perakende",
     "CCOLA": "Gıda ve Perakende", "AEFES": "Gıda ve Perakende", "ULKER": "Gıda ve Perakende",
     "TATGD": "Gıda ve Perakende", "TUKAS": "Gıda ve Perakende", "TABGD": "Gıda ve Perakende",
@@ -50,16 +55,19 @@ FALLBACK_SECTOR_MAP = {
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_live_bist100_and_sectors():
     """
-    Canlı veriyi çekmeyi dener. Başarısız olursa sıfır hata ile fallback listeye döner.
+    Canlı bir kaynağa bağlanmayı dener. Şu anda gerçek bir istek atılmıyor;
+    her zaman güvenli/statik fallback listeyi döndürür (0 hata garantisi için).
+    Gerçek canlı çekim (KAP/İş Yatırım/borsapy vb.) ileride buraya eklenebilir.
     """
     try:
-        # İleride KAP veya İş Yatırım'ın güncel DOM yapısına göre buraya request atılabilir.
-        # Örnek: response = requests.get("URL", timeout=5)
-        # Şimdilik sistemin asla çökmemesi ve 0 hata kuralı için güvenli listeyi döndürüyoruz.
+        # TODO: Gerçek canlı kaynak entegre edilecekse örnek iskelet:
+        # response = requests.get("URL", timeout=5)
+        # soup = BeautifulSoup(response.text, "html.parser")
+        # ... parse edilip live_map doldurulur ...
         live_map = FALLBACK_SECTOR_MAP.copy()
         return sorted(set(live_map.keys())), live_map
     except Exception:
-        # Herhangi bir bağlantı veya Parse hatasında sistem hissettirmeden yedeğe geçer
+        # Herhangi bir bağlantı veya parse hatasında sistem hissettirmeden yedeğe geçer
         return sorted(set(FALLBACK_SECTOR_MAP.keys())), FALLBACK_SECTOR_MAP
 
 # Aktif listeler bu fonksiyondan beslenir
