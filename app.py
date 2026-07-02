@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
@@ -84,14 +85,66 @@ def fetch_benchmark(period, interval):
         return df.dropna(subset=['Close'])
     return pd.DataFrame()
 
+# ── 2b. TLREF (TCMB EVDS) ─────────────────────────────────────────────────────
+# TLREF, BIST'i doğrudan etkileyen TL referans faizidir. yfinance üzerinde
+# bulunmadığı için TCMB'nin EVDS servisinden (ücretsiz API anahtarı ile)
+# günlük TP.TLREF.O serisi çekilir ve haftalık mum (OHLC) formatına çevrilir.
+# API anahtarı yoksa/erişim başarısız olursa ^TNX (ABD 10Y tahvil) yön-fikri
+# proxy'sine düşülür ve kullanıcıya bu açıkça bildirilir.
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_tlref_daily(api_key, years_back=3):
+    """TCMB EVDS'den günlük TLREF (TP.TLREF.O) serisini çeker."""
+    if not api_key:
+        return pd.Series(dtype=float)
+    start_date = (datetime.now() - pd.DateOffset(years=years_back)).strftime("%d-%m-%Y")
+    end_date = datetime.now().strftime("%d-%m-%Y")
+    url = (
+        "https://evds2.tcmb.gov.tr/service/evds/series=TP.TLREF.O"
+        f"&startDate={start_date}&endDate={end_date}&type=json&key={api_key}"
+    )
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        items = r.json().get("items", [])
+        if not items:
+            return pd.Series(dtype=float)
+        df = pd.DataFrame(items)
+        df["Tarih"] = pd.to_datetime(df["Tarih"], format="%d-%m-%Y")
+        df["Value"] = pd.to_numeric(df.get("TP_TLREF_O"), errors="coerce")
+        df = df.dropna(subset=["Value"]).set_index("Tarih").sort_index()
+        return df["Value"]
+    except Exception:
+        return pd.Series(dtype=float)
+
+def _weekly_ohlc_from_series(s):
+    """Günlük bir oran serisinden haftalık sentetik OHLC (mum) üretir."""
+    if s is None or s.empty:
+        return pd.DataFrame()
+    w = s.resample("W-FRI").agg(["first", "max", "min", "last"])
+    w.columns = ["Open", "High", "Low", "Close"]
+    return w.dropna()
+
 @st.cache_data(ttl=86400, show_spinner=False)
-def fetch_macro_rate():
-    # Haftalık faiz verisi (Proxy: ^TNX, ileride TLREF)
+def fetch_macro_rate_fallback():
+    """Gerçek TLREF verisine ulaşılamadığında kullanılan yedek proxy (^TNX).
+    NOT: Bu sadece kaba bir yön fikri verir, TL faiz ortamını birebir yansıtmaz."""
     df = yf.download("^TNX", period="5y", interval="1wk", auto_adjust=True, progress=False)
     if df is not None and len(df) > 55:
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
         return df.dropna(subset=['Close'])
     return pd.DataFrame()
+
+def get_tlref_weekly(api_key):
+    """Haftalık TLREF OHLC verisini + kaynağını döndürür. Öncelik gerçek TLREF'te."""
+    daily = fetch_tlref_daily(api_key)
+    weekly = _weekly_ohlc_from_series(daily)
+    if len(weekly) >= 55:
+        return weekly, "TLREF (TCMB EVDS)"
+    fb = fetch_macro_rate_fallback()
+    if not fb.empty:
+        return fb, "Proxy (^TNX — ABD 10Y Tahvil)"
+    return pd.DataFrame(), "Veri Yok"
 
 # ── 3. MATEMATİK & İNDİKATÖRLER ───────────────────────────────────────────────
 def _c(df): return df['Close'].squeeze().dropna()
@@ -145,25 +198,71 @@ def calc_adx(h, l, c, n=14):
     return adx, plus_di, minus_di
 
 # ── 4. MAKRO REJİM MOTORU ─────────────────────────────────────────────────────
-def get_macro_regime():
-    df_rate = fetch_macro_rate()
-    if df_rate.empty: return "Bilinmiyor", []
-    
+def get_macro_regime(api_key):
+    """
+    Haftalık TLREF (veya proxy) verisi üzerinden:
+      - SMA 8 / SMA 54 ile trend yönü
+      - ADX + D+/D- ile trend gücü ve yönü
+      - 2 aylık (~9 hafta) ve 1 yıllık (~52 hafta) getiri ile faiz yükseliyor mu / düşüyor mu
+      - "Plato" (yatay/kararsız) durumunu ayrıca tespit eder
+    döndürür.
+    """
+    df_rate, source = get_tlref_weekly(api_key)
+    metrics = {"source": source, "is_plato": False}
+    if df_rate.empty or len(df_rate) < 55:
+        return "Bilinmiyor", [], metrics
+
     c = _c(df_rate); h = _h(df_rate); l = _l(df_rate)
-    sma8 = float(sma(c, 8).iloc[-1])
-    sma54 = float(sma(c, 54).iloc[-1])
+    sma8_s = sma(c, 8); sma54_s = sma(c, 54)
+    sma8 = float(sma8_s.iloc[-1]); sma54 = float(sma54_s.iloc[-1])
     adx, plus_di, minus_di = calc_adx(h, l, c)
-    
     adx_val = float(adx.iloc[-1]); p_di = float(plus_di.iloc[-1]); m_di = float(minus_di.iloc[-1])
 
-    if sma8 > sma54 and p_di > m_di and adx_val > 20:
-        return "Savunmacı (Risk Off)", ["Gıda ve Perakende", "İletişim", "Sağlık"]
-    elif sma8 < sma54:
-        return "Büyüme (Risk On)", ["Teknoloji ve Yazılım", "Enerji", "Otomotiv", "Sanayi ve Kimya"]
-    else:
-        return "Denge (Plato)", ["İnşaat ve GMYO", "İnşaat Malzemeleri", "Ulaşım ve Turizm"]
+    last_val = float(c.iloc[-1])
+    ret_2m = (last_val / float(c.iloc[-9]) - 1) if len(c) > 9 else np.nan     # ~9 hafta ≈ 2 ay
+    ret_1y = (last_val / float(c.iloc[-53]) - 1) if len(c) > 53 else np.nan  # 52 hafta ≈ 1 yıl
 
-CURRENT_REGIME, REGIME_SECTORS = get_macro_regime()
+    spread_pct = abs(sma8 - sma54) / sma54 * 100 if sma54 else 0.0
+    is_plato = spread_pct < 3 and adx_val < 20
+
+    metrics.update({
+        "last": last_val, "sma8": sma8, "sma54": sma54,
+        "adx": adx_val, "plus_di": p_di, "minus_di": m_di,
+        "ret_2m": ret_2m, "ret_1y": ret_1y, "is_plato": is_plato,
+    })
+
+    if is_plato:
+        regime = "Denge (Plato)"
+        sectors = ["İnşaat ve GMYO", "İnşaat Malzemeleri", "Ulaşım ve Turizm"]
+    elif sma8 > sma54 and p_di > m_di and adx_val >= 20:
+        regime = "Savunmacı (Risk Off — Faiz Yükseliyor)"
+        sectors = ["Gıda ve Perakende", "İletişim", "Sağlık"]
+    elif sma8 < sma54 and m_di > p_di and adx_val >= 20:
+        regime = "Büyüme (Risk On — Faiz Düşüyor)"
+        sectors = ["Teknoloji ve Yazılım", "Enerji", "Otomotiv", "Sanayi ve Kimya"]
+    else:
+        regime = "Denge (Plato)"
+        sectors = ["İnşaat ve GMYO", "İnşaat Malzemeleri", "Ulaşım ve Turizm"]
+
+    return regime, sectors, metrics
+
+# TLREF için TCMB EVDS API anahtarı: önce sidebar/session_state, yoksa st.secrets
+_default_evds_key = ""
+try:
+    _default_evds_key = st.secrets.get("EVDS_API_KEY", "")
+except Exception:
+    pass
+if "evds_key" not in st.session_state:
+    st.session_state["evds_key"] = _default_evds_key
+
+with st.sidebar:
+    st.markdown("### 🔑 Faiz Veri Kaynağı (TLREF)")
+    st.session_state["evds_key"] = st.text_input(
+        "TCMB EVDS API Key", value=st.session_state["evds_key"], type="password",
+        help="Gerçek TLREF verisi için gerekli. Ücretsiz anahtar: evds2.tcmb.gov.tr → Kayıt Ol"
+    )
+
+CURRENT_REGIME, REGIME_SECTORS, REGIME_METRICS = get_macro_regime(st.session_state["evds_key"])
 
 # ── 5. STRATEJİLER ────────────────────────────────────────────────────────────
 def score_emre(df, bm_df, ticker=None):
@@ -263,6 +362,7 @@ def build_tlref_chart(df):
     fig.add_trace(go.Scatter(x=df.index, y=adx, name="ADX (Trend Gücü)", line=dict(color="#fff", width=2)), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=p_di, name="D+ (Alıcı)", line=dict(color="#10b981", width=1.5, dash="dot")), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=m_di, name="D- (Satıcı)", line=dict(color="#ef4444", width=1.5, dash="dot")), row=2, col=1)
+    fig.add_hline(y=20, line_dash="dash", line_color="#555", row=2, col=1, annotation_text="ADX 20 (Trend Eşiği)", annotation_font_color="#888", annotation_font_size=10)
     
     fig.update_layout(height=500, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(family="JetBrains Mono", color="#a3a3a3", size=11), margin=dict(l=0,r=0,t=30,b=0), xaxis_rangeslider_visible=False, hovermode="x unified", legend=dict(orientation="h", y=1.02, x=0, bgcolor="rgba(0,0,0,0)"))
     fig.update_xaxes(gridcolor="#1e1e1e", showgrid=True); fig.update_yaxes(gridcolor="#1e1e1e", showgrid=True)
@@ -334,21 +434,50 @@ if st.session_state.page == "tlref":
     st.markdown("## 🏦 TLREF & Makroekonomik Faiz Motoru")
     st.markdown("Haftalık periyotta faiz trendini (SMA 8/54) ve yön şiddetini (ADX, D+/D-) analiz eder.")
     st.markdown("---")
-    
-    df_rate = fetch_macro_rate()
-    if df_rate.empty:
-        st.error("Faiz verisi çekilemedi.")
+
+    df_rate, tlref_source = get_tlref_weekly(st.session_state["evds_key"])
+
+    if df_rate.empty or len(df_rate) < 55:
+        st.error("❌ Faiz verisi çekilemedi. Soldaki 'Faiz Veri Kaynağı' bölümüne geçerli bir TCMB EVDS API anahtarı gir (ücretsiz: evds2.tcmb.gov.tr).")
     else:
+        if "Proxy" in tlref_source:
+            st.warning(f"⚠️ Gerçek TLREF verisine ulaşılamadı, yön fikri için yedek gösterge kullanılıyor: **{tlref_source}**. Gerçek TLREF için soldan EVDS API anahtarı girin.")
+        else:
+            st.success(f"✅ Veri kaynağı: **{tlref_source}**")
+
         c1, c2 = st.columns([2, 1])
         with c1:
             st.plotly_chart(build_tlref_chart(df_rate), use_container_width=True, config={"displayModeBar":False})
         with c2:
+            m = REGIME_METRICS
             rc = "#10b981" if "On" in CURRENT_REGIME else "#ef4444" if "Off" in CURRENT_REGIME else "#f59e0b"
-            st.markdown(f"<div style='border:1px solid #333; padding:20px; border-radius:8px; background:#111; text-align:center;'><h4 style='margin:0; color:#888; font-size:0.9rem;'>Motorun Algıladığı Rejim</h4><h2 style='margin:10px 0; color:{rc}; font-size:1.8rem;'>{CURRENT_REGIME}</h2><p style='color:#a3a3a3; font-size:0.85rem;'>D+ ve D- kesişimleri ile SMA 8/54 periyotları kullanılarak hesaplanmıştır.</p></div>", unsafe_allow_html=True)
-            
+            if m.get("is_plato"):
+                plato_badge = "🟡 PLATO — YATAY SEYİR"
+            elif m.get("sma8", 0) > m.get("sma54", 0):
+                plato_badge = "🔴 FAİZ YÜKSELİŞTE"
+            else:
+                plato_badge = "🟢 FAİZ DÜŞÜŞTE"
+
+            st.markdown(f"""<div style='border:1px solid #333; padding:20px; border-radius:8px; background:#111; text-align:center;'>
+<h4 style='margin:0; color:#888; font-size:0.9rem;'>Motorun Algıladığı Rejim</h4>
+<h2 style='margin:10px 0; color:{rc}; font-size:1.5rem;'>{CURRENT_REGIME}</h2>
+<div class='stag'>{plato_badge}</div>
+<p style='color:#a3a3a3; font-size:0.8rem; margin-top:10px;'>D+ ve D- kesişimleri, ADX trend gücü ve SMA 8/54 periyotları ile hesaplanır.</p>
+</div>""", unsafe_allow_html=True)
+
+            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+            mc1, mc2 = st.columns(2)
+            mc1.metric("Güncel Faiz", f"%{m.get('last', float('nan')):.2f}" if m.get('last') is not None else "N/A")
+            mc2.metric("ADX (Trend Gücü)", f"{m.get('adx', float('nan')):.1f}" if m.get('adx') is not None else "N/A")
+
+            mc3, mc4 = st.columns(2)
+            r2m = m.get("ret_2m", np.nan); r1y = m.get("ret_1y", np.nan)
+            mc3.metric("2 Aylık Değişim", f"{r2m*100:+.2f}%" if r2m is not None and not np.isnan(r2m) else "N/A")
+            mc4.metric("1 Yıllık Değişim", f"{r1y*100:+.2f}%" if r1y is not None and not np.isnan(r1y) else "N/A")
+
         st.markdown("### 🟢 Mevcut Rejimden Olumlu Etkilenen Hisseler")
-        st.markdown(f"**Desteklenen Sektörler:** {', '.join(REGIME_SECTORS)}")
-        
+        st.markdown(f"**Desteklenen Sektörler:** {', '.join(REGIME_SECTORS) if REGIME_SECTORS else 'Belirlenemedi'}")
+
         theme_tickers = [t+".IS" for t, s in SECTOR_MAP.items() if s in REGIME_SECTORS]
         with st.spinner("Hisseler taranıyor..."):
             bm_df = fetch_benchmark(period, interval)
