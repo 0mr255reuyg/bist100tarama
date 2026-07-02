@@ -86,6 +86,7 @@ def fetch_benchmark(period, interval):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_macro_rate():
+    # Haftalık faiz verisi (Proxy: ^TNX, ileride TLREF)
     df = yf.download("^TNX", period="5y", interval="1wk", auto_adjust=True, progress=False)
     if df is not None and len(df) > 55:
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
@@ -155,7 +156,7 @@ def get_macro_regime():
     
     adx_val = float(adx.iloc[-1]); p_di = float(plus_di.iloc[-1]); m_di = float(minus_di.iloc[-1])
 
-    if sma8 > sma54 and p_di > m_di and adx_val > 25:
+    if sma8 > sma54 and p_di > m_di and adx_val > 20:
         return "Savunmacı (Risk Off)", ["Gıda ve Perakende", "İletişim", "Sağlık"]
     elif sma8 < sma54:
         return "Büyüme (Risk On)", ["Teknoloji ve Yazılım", "Enerji", "Otomotiv", "Sanayi ve Kimya"]
@@ -224,7 +225,7 @@ STRATEGY_FN = {
     "momentum": (score_momentum, "Momentum Kırılımcısı")
 }
 
-# ── 6. GRAFİK VE DETAY PANELLERİ ──────────────────────────────────────────────
+# ── 6. GRAFİKLER ──────────────────────────────────────────────────────────────
 def build_chart(df, ticker, interval):
     c = _c(df); h = _h(df); l = _l(df); v = _v(df); o = df['Open'].squeeze()
     s20 = sma(c,20); s50 = sma(c,50); ml, sl, hl_s = macd_calc(c)
@@ -246,6 +247,25 @@ def build_chart(df, ticker, interval):
     for i in range(1,4):
         fig.update_xaxes(gridcolor="#1e1e1e", showgrid=True, row=i, col=1)
         fig.update_yaxes(gridcolor="#1e1e1e", showgrid=True, row=i, col=1)
+    return fig
+
+def build_tlref_chart(df):
+    c = _c(df); h = _h(df); l = _l(df); o = df['Open'].squeeze()
+    s8 = sma(c, 8); s54 = sma(c, 54)
+    adx, p_di, m_di = calc_adx(h, l, c)
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.65, 0.35], vertical_spacing=0.04)
+    
+    fig.add_trace(go.Candlestick(x=df.index, open=o, high=h, low=l, close=c, name="TLREF (Haftalık)", increasing_fillcolor="#10b981", increasing_line_color="#10b981", decreasing_fillcolor="#ef4444", decreasing_line_color="#ef4444"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=s8, name="SMA 8 (Kısa)", line=dict(color="#38bdf8",width=1.5)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=s54, name="SMA 54 (Uzun)", line=dict(color="#f59e0b",width=1.5)), row=1, col=1)
+    
+    fig.add_trace(go.Scatter(x=df.index, y=adx, name="ADX (Trend Gücü)", line=dict(color="#fff", width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=p_di, name="D+ (Alıcı)", line=dict(color="#10b981", width=1.5, dash="dot")), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=m_di, name="D- (Satıcı)", line=dict(color="#ef4444", width=1.5, dash="dot")), row=2, col=1)
+    
+    fig.update_layout(height=500, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(family="JetBrains Mono", color="#a3a3a3", size=11), margin=dict(l=0,r=0,t=30,b=0), xaxis_rangeslider_visible=False, hovermode="x unified", legend=dict(orientation="h", y=1.02, x=0, bgcolor="rgba(0,0,0,0)"))
+    fig.update_xaxes(gridcolor="#1e1e1e", showgrid=True); fig.update_yaxes(gridcolor="#1e1e1e", showgrid=True)
     return fig
 
 def render_detail(result, strategy, interval):
@@ -284,11 +304,14 @@ with st.sidebar:
         st.session_state.page = "search"; st.session_state.search_ticker = search_input; st.rerun()
 
     st.markdown("---")
-    st.markdown("### 🌍 Makro Tema")
-    all_themes = ["—"] + list(MACRO_THEMES_PRIMARY.keys()) + ["──────"] + list(MACRO_THEMES_SECONDARY.keys())
-    macro_theme = st.selectbox("Tema Seç", all_themes)
+    st.markdown("### 🌍 Makro Menü")
+    if st.button("🏦 TLREF & Faiz Analizi", use_container_width=True):
+        st.session_state.page = "tlref"; st.rerun()
+        
+    all_themes = ["— Temalar —"] + list(MACRO_THEMES_PRIMARY.keys()) + ["──────"] + list(MACRO_THEMES_SECONDARY.keys())
+    macro_theme = st.selectbox("Tema Seç", all_themes, label_visibility="collapsed")
     if st.button("Temaya Göre Tara", use_container_width=True):
-        if macro_theme not in ["—","──────"]:
+        if macro_theme not in ["— Temalar —","──────"]:
             st.session_state.page = "macro"; st.session_state.macro_theme = macro_theme; st.rerun()
 
     st.markdown("---")
@@ -306,8 +329,48 @@ with st.sidebar:
 
 # ── 9. SAYFALAR ───────────────────────────────────────────────────────────────
 
+# 🟢 SAYFA: TLREF ANALİZİ
+if st.session_state.page == "tlref":
+    st.markdown("## 🏦 TLREF & Makroekonomik Faiz Motoru")
+    st.markdown("Haftalık periyotta faiz trendini (SMA 8/54) ve yön şiddetini (ADX, D+/D-) analiz eder.")
+    st.markdown("---")
+    
+    df_rate = fetch_macro_rate()
+    if df_rate.empty:
+        st.error("Faiz verisi çekilemedi.")
+    else:
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.plotly_chart(build_tlref_chart(df_rate), use_container_width=True, config={"displayModeBar":False})
+        with c2:
+            rc = "#10b981" if "On" in CURRENT_REGIME else "#ef4444" if "Off" in CURRENT_REGIME else "#f59e0b"
+            st.markdown(f"<div style='border:1px solid #333; padding:20px; border-radius:8px; background:#111; text-align:center;'><h4 style='margin:0; color:#888; font-size:0.9rem;'>Motorun Algıladığı Rejim</h4><h2 style='margin:10px 0; color:{rc}; font-size:1.8rem;'>{CURRENT_REGIME}</h2><p style='color:#a3a3a3; font-size:0.85rem;'>D+ ve D- kesişimleri ile SMA 8/54 periyotları kullanılarak hesaplanmıştır.</p></div>", unsafe_allow_html=True)
+            
+        st.markdown("### 🟢 Mevcut Rejimden Olumlu Etkilenen Hisseler")
+        st.markdown(f"**Desteklenen Sektörler:** {', '.join(REGIME_SECTORS)}")
+        
+        theme_tickers = [t+".IS" for t, s in SECTOR_MAP.items() if s in REGIME_SECTORS]
+        with st.spinner("Hisseler taranıyor..."):
+            bm_df = fetch_benchmark(period, interval)
+            td = fetch_data(theme_tickers, period, interval)
+        
+        rows = []
+        for ticker, df_t in td.items():
+            if df_t is None or len(df_t) < 55: continue
+            sc_e, mx_e, _, _ = score_emre(df_t, bm_df, ticker)
+            sc_m, mx_m, _, _ = score_momentum(df_t, bm_df, ticker)
+            c_t = _c(df_t); bm_t = _c(bm_df)
+            rs = rs_score(c_t, bm_t, 20)
+            rows.append({'Hisse': ticker.replace('.IS',''), 'Sektör': get_sector(ticker), 'Emre Skoru': f"{sc_e}/{mx_e}", 'Momentum Skoru': f"{sc_m}/{mx_m}", 'RS (20g)': f"{rs*100:.1f}%" if not np.isnan(rs) else "N/A", '_es': sc_e})
+        
+        if rows:
+            df_rows = pd.DataFrame(rows).sort_values('_es', ascending=False).drop(columns=['_es'])
+            st.dataframe(df_rows, use_container_width=True, height=400)
+        else:
+            st.info("Bu rejime uygun hisse bulunamadı.")
+
 # 🟢 SAYFA: ARAMA
-if st.session_state.page == "search":
+elif st.session_state.page == "search":
     ticker_q = st.session_state.get("search_ticker","")
     ticker_yf = ticker_q+".IS"
     st.markdown(f"## 🔍 {ticker_q} Analizi")
@@ -391,7 +454,7 @@ elif st.session_state.page == "sektor":
 # 🟢 SAYFA: MAKRO TEMA
 elif st.session_state.page == "macro":
     macro_theme = st.session_state.get("macro_theme","")
-    if not macro_theme or macro_theme in ["—","──────"]: st.session_state.page = "scanner"; st.rerun()
+    if not macro_theme or macro_theme in ["— Temalar —","──────"]: st.session_state.page = "scanner"; st.rerun()
 
     info = get_theme_info(macro_theme)
     theme_sectors = info.get("sektörler",[])
@@ -475,6 +538,21 @@ elif st.session_state.page == "perf":
     st.markdown("### 📈 Portföy Performansı vs BIST 100")
     perf_map = {sk:(bt_results[sk]["pv"],bt_results[sk]["bm"]) for sk in ["emre","momentum"] if bt_results[sk].get("pv") is not None}
     if perf_map: st.plotly_chart(build_perf_chart(perf_map,100_000), use_container_width=True, config={"displayModeBar":False})
+
+    st.markdown("### 📅 Aylık Portföy ve Getiri Tablosu")
+    mt1, mt2 = st.tabs([STRATEGY_FN["emre"][1], STRATEGY_FN["momentum"][1]])
+    for tab, sk in zip([mt1, mt2], ["emre", "momentum"]):
+        with tab:
+            m_df = bt_results[sk].get("monthly")
+            if m_df is not None and not m_df.empty:
+                def color_pnl(val):
+                    if isinstance(val, str) and val.startswith('+'): return 'color:#10b981'
+                    if isinstance(val, str) and val.startswith('-'): return 'color:#ef4444'
+                    return ''
+                cols_s = ['Aylık P&L'] if 'Aylık P&L' in m_df.columns else []
+                st.dataframe(m_df.style.map(color_pnl, subset=cols_s), use_container_width=True, height=350)
+            else:
+                st.info("Aylık tablo bulunamadı.")
 
     st.markdown("### 📋 İşlem Log Defteri (Rebalans Geçmişi)")
     lt1,lt2 = st.tabs([STRATEGY_FN["emre"][1], STRATEGY_FN["momentum"][1]])
