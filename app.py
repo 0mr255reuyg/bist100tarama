@@ -86,65 +86,53 @@ def fetch_benchmark(period, interval):
     return pd.DataFrame()
 
 # ── 2b. TLREF (TCMB EVDS) ─────────────────────────────────────────────────────
-# TLREF, BIST'i doğrudan etkileyen TL referans faizidir. yfinance üzerinde
-# bulunmadığı için TCMB'nin EVDS v3 REST servisinden borsapy sarmalayıcısı
-# ile çekilir. TLREF'in gerçek günlük Düşük/Yüksek/Kapanış serileri
-# (TP.BISTTLREF.DUSUK/YUKSEK/KAPANIS) kullanılır ve haftalık muma çevrilir.
-# NOT: TCMB, EVDS'yi 2025 sonunda evds3.tcmb.gov.tr'ye taşıdı ve eski
-# evds2.tcmb.gov.tr/service/evds/?key=... adresini tamamen kapattı; bu yüzden
-# ham HTTP isteği yerine bunu güncel tutan borsapy kullanılıyor.
-# API anahtarı yoksa/erişim başarısız olursa ^TNX (ABD 10Y tahvil) yön-fikri
-# proxy'sine düşülür ve kullanıcıya bu açıkça bildirilir.
+# TLREF, BIST'i doğrudan etkileyen TL referans faizidir. TLREF fiilen TCMB'nin
+# gecelik (O/N) faiz koridoruna çok yakın seyreder. Önceki denemede EVDS'den
+# çekilen "TP.BISTTLREF.*" serisinin aslında bir ORAN değil, 2019'dan beri
+# bileşik büyüyen bir ENDEKS (BIST TLREF Endeksi) olduğu ortaya çıktı — bu
+# yüzden %6000+ gibi anlamsız değerler geliyordu. Onun yerine borsapy'nin
+# `bp.TCMB()` sınıfı üzerinden TCMB'nin gerçek gecelik (O/N) faiz koridorunu
+# (yüzde olarak, örn. %46.0) kullanıyoruz. Bu veri EVDS'den değil, TCMB'nin
+# kendi faiz sayfasından geldiği için API ANAHTARI GEREKMEZ.
+# Politika faizi MPC toplantı tarihlerinde değişip aralarda sabit kaldığından,
+# günlük indekse ileri doldurularak (ffill) yayılır, sonra haftalık muma çevrilir.
+# TCMB kaynağına herhangi bir sebeple ulaşılamazsa ^TNX (ABD 10Y tahvil) yön-
+# fikri proxy'sine düşülür ve kullanıcıya bu açıkça bildirilir.
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_tlref_daily_ohlc(api_key, years_back=3):
-    """TCMB EVDS'den TLREF'in günlük Düşük/Yüksek/Kapanış serilerini çeker."""
-    if not api_key:
-        return pd.DataFrame()
+def fetch_tl_rate_daily():
+    """TCMB'nin gerçek gecelik (O/N) borç verme faizini (yüzde) günlük olarak
+    döndürür. API anahtarı gerekmez."""
     try:
-        bp.set_evds_key(api_key)
-        start = (datetime.now() - pd.DateOffset(years=years_back)).strftime("%Y-%m-%d")
-        end = datetime.now().strftime("%Y-%m-%d")
-        df = bp.evds_download(
-            ["TP.BISTTLREF.DUSUK", "TP.BISTTLREF.YUKSEK", "TP.BISTTLREF.KAPANIS"],
-            start=start, end=end, frequency="daily",
-        )
-        if df is None or df.empty:
-            return pd.DataFrame()
-        df = df.rename(columns={
-            "TP.BISTTLREF.DUSUK": "Low",
-            "TP.BISTTLREF.YUKSEK": "High",
-            "TP.BISTTLREF.KAPANIS": "Close",
-        })
-        for col in ["Low", "High", "Close"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        df.index = pd.to_datetime(df.index)
-        df = df.dropna(subset=["Close"]).sort_index()
-        return df
+        tcmb = bp.TCMB()
+        hist = tcmb.history("overnight")
+        if hist is None or hist.empty:
+            return pd.Series(dtype=float)
+        hist.index = pd.to_datetime(hist.index)
+        hist = hist.sort_index()
+        rate = hist["lending"] if "lending" in hist.columns else hist.iloc[:, -1]
+        rate = pd.to_numeric(rate, errors="coerce").dropna()
+        if rate.empty:
+            return pd.Series(dtype=float)
+        full_idx = pd.date_range(rate.index.min(), datetime.now(), freq="D")
+        daily = rate.reindex(full_idx).ffill().dropna()
+        return daily
     except Exception:
-        return pd.DataFrame()
+        return pd.Series(dtype=float)
 
-def _weekly_ohlc_from_daily_hlc(df):
-    """Günlük Düşük/Yüksek/Kapanış verisinden haftalık mum üretir.
-    'Açılış' serisi EVDS'de olmadığından, haftanın ilk günkü kapanışı
-    Open olarak kullanılır (High/Low gerçek günlük değerlerden alınır)."""
-    if df is None or df.empty:
+def _weekly_ohlc_from_series(s):
+    """Günlük bir oran serisinden haftalık mum (OHLC) üretir. Faiz toplantı
+    tarihleri arasında sabit kaldığından çoğu hafta düz mum olur; bu normaldir
+    ve trend/rejim tespiti için yeterlidir."""
+    if s is None or s.empty:
         return pd.DataFrame()
-    close_agg = df["Close"].resample("W-FRI").agg(["first", "last"])
-    high_col = df["High"] if "High" in df.columns else df["Close"]
-    low_col = df["Low"] if "Low" in df.columns else df["Close"]
-    w = pd.DataFrame({
-        "Open": close_agg["first"],
-        "High": high_col.resample("W-FRI").max(),
-        "Low": low_col.resample("W-FRI").min(),
-        "Close": close_agg["last"],
-    })
+    w = s.resample("W-FRI").agg(["first", "max", "min", "last"])
+    w.columns = ["Open", "High", "Low", "Close"]
     return w.dropna()
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_macro_rate_fallback():
-    """Gerçek TLREF verisine ulaşılamadığında kullanılan yedek proxy (^TNX).
+    """Gerçek faiz verisine ulaşılamadığında kullanılan yedek proxy (^TNX).
     NOT: Bu sadece kaba bir yön fikri verir, TL faiz ortamını birebir yansıtmaz."""
     df = yf.download("^TNX", period="5y", interval="1wk", auto_adjust=True, progress=False)
     if df is not None and len(df) > 55:
@@ -152,12 +140,12 @@ def fetch_macro_rate_fallback():
         return df.dropna(subset=['Close'])
     return pd.DataFrame()
 
-def get_tlref_weekly(api_key):
-    """Haftalık TLREF OHLC verisini + kaynağını döndürür. Öncelik gerçek TLREF'te."""
-    daily = fetch_tlref_daily_ohlc(api_key)
-    weekly = _weekly_ohlc_from_daily_hlc(daily)
+def get_tlref_weekly():
+    """Haftalık TL faiz OHLC verisini + kaynağını döndürür. Öncelik gerçek TCMB O/N faizinde."""
+    daily = fetch_tl_rate_daily()
+    weekly = _weekly_ohlc_from_series(daily)
     if len(weekly) >= 55:
-        return weekly, "TLREF (TCMB EVDS)"
+        return weekly, "TCMB Gecelik (O/N) Faizi"
     fb = fetch_macro_rate_fallback()
     if not fb.empty:
         return fb, "Proxy (^TNX — ABD 10Y Tahvil)"
@@ -215,16 +203,16 @@ def calc_adx(h, l, c, n=14):
     return adx, plus_di, minus_di
 
 # ── 4. MAKRO REJİM MOTORU ─────────────────────────────────────────────────────
-def get_macro_regime(api_key):
+def get_macro_regime():
     """
-    Haftalık TLREF (veya proxy) verisi üzerinden:
+    Haftalık TL faiz (veya proxy) verisi üzerinden:
       - SMA 8 / SMA 54 ile trend yönü
       - ADX + D+/D- ile trend gücü ve yönü
       - 2 aylık (~9 hafta) ve 1 yıllık (~52 hafta) getiri ile faiz yükseliyor mu / düşüyor mu
       - "Plato" (yatay/kararsız) durumunu ayrıca tespit eder
     döndürür.
     """
-    df_rate, source = get_tlref_weekly(api_key)
+    df_rate, source = get_tlref_weekly()
     metrics = {"source": source, "is_plato": False}
     if df_rate.empty or len(df_rate) < 55:
         return "Bilinmiyor", [], metrics
@@ -263,23 +251,7 @@ def get_macro_regime(api_key):
 
     return regime, sectors, metrics
 
-# TLREF için TCMB EVDS API anahtarı: önce sidebar/session_state, yoksa st.secrets
-_default_evds_key = ""
-try:
-    _default_evds_key = st.secrets.get("EVDS_API_KEY", "")
-except Exception:
-    pass
-if "evds_key" not in st.session_state:
-    st.session_state["evds_key"] = _default_evds_key
-
-with st.sidebar:
-    st.markdown("### 🔑 Faiz Veri Kaynağı (TLREF)")
-    st.session_state["evds_key"] = st.text_input(
-        "TCMB EVDS API Key", value=st.session_state["evds_key"], type="password",
-        help="Gerçek TLREF verisi için gerekli. Ücretsiz anahtar: evds2.tcmb.gov.tr → Kayıt Ol"
-    )
-
-CURRENT_REGIME, REGIME_SECTORS, REGIME_METRICS = get_macro_regime(st.session_state["evds_key"])
+CURRENT_REGIME, REGIME_SECTORS, REGIME_METRICS = get_macro_regime()
 
 # ── 5. STRATEJİLER ────────────────────────────────────────────────────────────
 def score_emre(df, bm_df, ticker=None):
@@ -452,13 +424,13 @@ if st.session_state.page == "tlref":
     st.markdown("Haftalık periyotta faiz trendini (SMA 8/54) ve yön şiddetini (ADX, D+/D-) analiz eder.")
     st.markdown("---")
 
-    df_rate, tlref_source = get_tlref_weekly(st.session_state["evds_key"])
+    df_rate, tlref_source = get_tlref_weekly()
 
     if df_rate.empty or len(df_rate) < 55:
-        st.error("❌ Faiz verisi çekilemedi. Soldaki 'Faiz Veri Kaynağı' bölümüne geçerli bir TCMB EVDS API anahtarı gir (ücretsiz: evds2.tcmb.gov.tr).")
+        st.error("❌ Faiz verisi çekilemedi. TCMB kaynağına şu an ulaşılamıyor olabilir, birazdan tekrar dene.")
     else:
         if "Proxy" in tlref_source:
-            st.warning(f"⚠️ Gerçek TLREF verisine ulaşılamadı, yön fikri için yedek gösterge kullanılıyor: **{tlref_source}**. Gerçek TLREF için soldan EVDS API anahtarı girin.")
+            st.warning(f"⚠️ TCMB faiz verisine ulaşılamadı, yön fikri için yedek gösterge kullanılıyor: **{tlref_source}**.")
         else:
             st.success(f"✅ Veri kaynağı: **{tlref_source}**")
 
@@ -655,7 +627,7 @@ elif st.session_state.page == "perf":
         with st.spinner("2 yıllık veri çekiliyor ve simülasyon hesaplanıyor..."):
             bm_df_bt = fetch_benchmark("2y","1d")
             stock_bt = fetch_data(BIST100_YF,"2y","1d")
-            tlref_bt, tlref_bt_source = get_tlref_weekly(st.session_state["evds_key"])
+            tlref_bt, tlref_bt_source = get_tlref_weekly()
 
         st.caption(f"Makro rüzgar kriteri için kullanılan faiz kaynağı: **{tlref_bt_source}**")
 
