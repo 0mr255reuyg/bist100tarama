@@ -44,6 +44,39 @@ def _month_starts(index, start, end):
     df_tmp = pd.DataFrame({'d': dates, 'ym': [x.strftime('%Y-%m') for x in dates]})
     return list(df_tmp.groupby('ym')['d'].first())
 
+# Bazı stratejiler için minimum kalite eşiği ve hedef pozisyon aralığı.
+# Burada olmayan stratejiler (emre, momentum) eski davranışı korur: skora
+# bakılmaksızın her zaman tam top_n (5) hisse seçilir. "claude" için eşiğin
+# altında kalan adaylar havuza hiç girmez; 4-5 arası pozisyon hedeflenir.
+STRATEGY_MIN_SCORE = {"claude": 4}
+STRATEGY_TARGET_RANGE = {"claude": (4, 5)}
+
+def _pick_candidates(candidates, strategy, top_n=5, max_per_sector=2):
+    """Skor+RS'ye göre zaten sıralanmış adaylardan portföyü seçer.
+    Sektör başına en fazla `max_per_sector` hisse kuralı her zaman geçerlidir.
+    'claude' stratejisinde ek olarak minimum skor eşiği ve 4-5 pozisyon
+    hedefi uygulanır; diğerlerinde davranış (her zaman top_n hisse) değişmez."""
+    def _fill(pool, limit):
+        picked, sector_counts = [], {}
+        for cand in pool:
+            sect = get_sector(cand['ticker'])
+            if sector_counts.get(sect, 0) < max_per_sector:
+                picked.append(cand); sector_counts[sect] = sector_counts.get(sect, 0) + 1
+            if len(picked) == limit: break
+        return picked
+
+    min_score = STRATEGY_MIN_SCORE.get(strategy)
+    if min_score is None:
+        return _fill(candidates, top_n)
+
+    target_min, target_max = STRATEGY_TARGET_RANGE.get(strategy, (top_n, top_n))
+    qualified = [c for c in candidates if c['score'] >= min_score]
+    picked = _fill(qualified, target_max)
+    if len(picked) < target_min:
+        relaxed = [c for c in candidates if c['score'] >= max(min_score - 1, 0)]
+        picked = _fill(relaxed, target_min)
+    return picked
+
 # ── 1b. TARİHSEL TLREF MAKRO REJİMİ ───────────────────────────────────────────
 # app.py'deki canlı get_macro_regime() ile AYNI mantık (SMA8/54, ADX, D+/D-,
 # Plato tespiti); burada geçmişteki her rebalans tarihi için ayrı ayrı
@@ -93,6 +126,9 @@ def _regime_sectors_at(tlref_weekly, date):
     return _REGIME_SECTOR_MAP["plato"]
 
 # ── 2. KRİTER SKORU (GEÇMİŞ TARİH İÇİN) ───────────────────────────────────────
+def _max_score_for(strategy):
+    return {"emre": 5, "momentum": 4, "claude": 6}.get(strategy, 5)
+
 def _score_at(strategy, df, bm_df, date, ticker=None, regime_sectors=None):
     try:
         c = df['Close'].squeeze(); h = df['High'].squeeze()
@@ -100,7 +136,7 @@ def _score_at(strategy, df, bm_df, date, ticker=None, regime_sectors=None):
         bm = bm_df['Close'].squeeze()
 
         valid = c.index[c.index <= date]
-        if len(valid) < 55: return (0, 4) if strategy == "momentum" else (0, 5)
+        if len(valid) < 55: return 0, _max_score_for(strategy)
         c_s = c.loc[valid]; h_s = h.loc[valid]
         lo_s = lo.loc[valid]; v_s = v.loc[valid]
         price = float(c_s.iloc[-1])
@@ -143,9 +179,47 @@ def _score_at(strategy, df, bm_df, date, ticker=None, regime_sectors=None):
             ]
             return sum(checks), 4
 
+        elif strategy == "claude":
+            # Claude Stratejisi — canlı score_claude (app.py) ile birebir aynı 6 kriter:
+            # çoklu-onaylı trend yapısı, kalıcı (20g+60g) RS, getiri/risk verimliliği,
+            # sağlıklı RSI bandı, hacim katılımı, gerçek TLREF/TCMB rejimine göre makro rüzgar.
+            sma50_hist = _sma(c_s, 50)
+            sma50_valid = sma50_hist.dropna()
+            if len(sma50_valid) < 7:
+                return 0, 6
+            s50 = float(sma50_hist.iloc[-1])
+            s50_prev = float(sma50_valid.iloc[-6])
+            rsi_v = float(_rsi(c_s).iloc[-1])
+            rs20 = _rs_at(c_s, bm, date, days=20)
+            rs60 = _rs_at(c_s, bm, date, days=60)
+            a14 = _atr(h_s, lo_s, c_s)
+            atr_now = float(a14.iloc[-1])
+            atr_pct = (atr_now / price * 100) if price > 0 else np.nan
+            ret_20 = (price / float(c_s.iloc[-21]) - 1) * 100 if len(c_s) > 21 else np.nan
+            eff_ratio = (ret_20 / (atr_pct * (20 ** 0.5))) if (not np.isnan(atr_pct) and atr_pct > 0 and not np.isnan(ret_20)) else np.nan
+
+            if regime_sectors is not None and ticker is not None:
+                macro_ok = get_sector(ticker) in regime_sectors
+            else:
+                macro_ok = price > s50  # TLREF verisi yoksa basit proxy
+
+            trend_ok = price > s50 and s50 > s50_prev
+            rs_ok = (rs20 is not None and not np.isnan(rs20) and rs20 > 0) and \
+                    (rs60 is not None and not np.isnan(rs60) and rs60 > 0)
+
+            checks = [
+                trend_ok,
+                rs_ok,
+                (not np.isnan(eff_ratio)) and eff_ratio > 0.3,
+                45 <= rsi_v <= 72,
+                (not np.isnan(vr)) and vr >= 1.0,
+                macro_ok,
+            ]
+            return sum(checks), 6
+
     except Exception:
         pass
-    return (0, 4) if strategy == "momentum" else (0, 5)
+    return 0, _max_score_for(strategy)
 
 # ── 3. ANA BACKTEST MOTORU (REBALANS & LOG DEFTERİ) ───────────────────────────
 def run_backtest(strategy, stock_data, benchmark_df, tlref_weekly=None, start_capital=100_000, top_n=5):
@@ -192,16 +266,10 @@ def run_backtest(strategy, stock_data, benchmark_df, tlref_weekly=None, start_ca
 
         # Puan ve RS'ye göre sırala (Eşitlik bozucu)
         candidates.sort(key=lambda x: (x['score'], x['rs']), reverse=True)
-        
-        # Max 2 Sektör Kuralı ile Top 5 Seçimi
-        top5 = []
-        sector_counts = {}
-        for cand in candidates:
-            sect = get_sector(cand['ticker'])
-            if sector_counts.get(sect, 0) < 2:
-                top5.append(cand)
-                sector_counts[sect] = sector_counts.get(sect, 0) + 1
-            if len(top5) == top_n: break
+
+        # Max 2 Sektör Kuralı ile Portföy Seçimi ("claude" için ek olarak
+        # min. kalite eşiği + 4-5 pozisyon hedefi; diğerlerinde eski davranış)
+        top5 = _pick_candidates(candidates, strategy, top_n=top_n, max_per_sector=2)
 
         target_tickers = {q['ticker'] for q in top5}
         target_alloc = port_val / max(1, len(target_tickers)) if target_tickers else 0
@@ -299,8 +367,8 @@ def calc_stats(pv_df, bm_norm, start_capital):
     alpha = total - bm_ret if bm_ret is not None else None
     return {'Toplam Getiri': f"{total:+.1f}%", 'CAGR': f"{cagr:+.1f}%", 'Max Drawdown': f"{max_dd:.1f}%", 'BIST100 Getirisi': f"{bm_ret:+.1f}%" if bm_ret is not None else 'N/A', 'Alpha': f"{alpha:+.1f}%" if alpha is not None else 'N/A', 'Son Değer': f"₺{pv.iloc[-1]:,.0f}"}
 
-STRAT_COLORS = { 'emre': '#f59e0b', 'momentum': '#a78bfa' }
-STRAT_LABELS = { 'emre': "🟠 Emre'nin Makro Stratejisi", 'momentum': '🟣 Momentum' }
+STRAT_COLORS = { 'emre': '#f59e0b', 'momentum': '#a78bfa', 'claude': '#38bdf8' }
+STRAT_LABELS = { 'emre': "🟠 Emre'nin Makro Stratejisi", 'momentum': '🟣 Momentum', 'claude': '🔵 Claude Stratejisi' }
 
 def build_perf_chart(results_map, start_capital):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.68, 0.32], vertical_spacing=0.04)
