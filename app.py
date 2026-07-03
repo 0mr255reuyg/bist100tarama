@@ -308,10 +308,97 @@ def score_momentum(df, bm_df, ticker=None):
         return sc, 4, criteria, details
     except Exception as e: return 0, 4, {"Hata": (False, str(e))}, {}
 
+def score_claude(df, bm_df, ticker=None):
+    """Claude Stratejisi — "kalıcılık + verimlilik" filtresi.
+    6 kriter: çoklu-onaylı trend yapısı, kalıcı (20g+60g) göreceli güç,
+    getiri/risk (ATR'ye göre) verimliliği, sağlıklı RSI bandı, hacim
+    katılımı ve gerçek TCMB faiz rejimine göre makro rüzgar.
+    NOT: Bu strateji, en az 4/6 kriteri geçmeyen adayları havuza hiç almaz
+    (bkz. STRATEGY_MIN_SCORE / _pick_portfolio) — zayıf ayda zorla 5 hisse
+    doldurmaz, 4-5 arası pozisyon hedefler."""
+    try:
+        c = _c(df); h = _h(df); l = _l(df); v = _v(df)
+        if len(c) < 55: return 0, 6, {}, {}
+        bm = _c(bm_df) if not bm_df.empty else pd.Series(dtype=float)
+
+        price = float(c.iloc[-1])
+        sma50_s = sma(c, 50)
+        s50 = float(sma50_s.iloc[-1])
+        sma50_valid = sma50_s.dropna()
+        s50_prev = float(sma50_valid.iloc[-6]) if len(sma50_valid) > 6 else np.nan
+        rsi_v = float(rsi_calc(c).iloc[-1])
+        rs20 = rs_score(c, bm, 20)
+        rs60 = rs_score(c, bm, 60)
+        vr = vol_ratio(v, 20)
+
+        a14 = atr_calc(h, l, c)
+        atr_now = float(a14.dropna().iloc[-1]) if len(a14.dropna()) > 0 else np.nan
+        atr_pct = (atr_now / price * 100) if (not np.isnan(atr_now) and price > 0) else np.nan
+        ret_20 = (price / float(c.iloc[-21]) - 1) * 100 if len(c) > 21 else np.nan
+        eff_ratio = (ret_20 / (atr_pct * (20 ** 0.5))) if (not np.isnan(atr_pct) and atr_pct > 0 and not np.isnan(ret_20)) else np.nan
+
+        sector = get_sector(ticker) if ticker else ""
+        is_macro_aligned = sector in REGIME_SECTORS
+        trend_ok = (not np.isnan(s50_prev)) and price > s50 and s50 > s50_prev
+        rs_ok = (not np.isnan(rs20) and rs20 > 0) and (not np.isnan(rs60) and rs60 > 0)
+
+        criteria = {
+            "Trend Yapısı Onaylı (Fiyat>SMA50, SMA50↑)": (trend_ok, f"{price:.2f} > {s50:.2f} ({'yükseliyor' if not np.isnan(s50_prev) and s50>s50_prev else 'yatay/düşüyor'})"),
+            "Kalıcı Göreceli Güç (RS20 & RS60 +)": (rs_ok, f"RS20={rs20*100:+.1f}% RS60={rs60*100:+.1f}%" if not np.isnan(rs20) and not np.isnan(rs60) else "N/A"),
+            "Getiri/Risk Verimliliği (20g)": (not np.isnan(eff_ratio) and eff_ratio > 0.3, f"{eff_ratio:.2f}" if not np.isnan(eff_ratio) else "N/A"),
+            "Sağlıklı RSI Bandı (45-72)": (45 <= rsi_v <= 72, f"RSI={rsi_v:.1f}"),
+            "Hacim Katılımı (≥1.0x Ort.)": (not np.isnan(vr) and vr >= 1.0, f"{vr:.2f}x" if not np.isnan(vr) else "N/A"),
+            "Makro Rüzgar (TCMB Faiz Rejimi)": (is_macro_aligned, f"{sector} ({CURRENT_REGIME})"),
+        }
+        details = {
+            "Fiyat": f"{price:.2f} ₺", "SMA 50": f"{s50:.2f}", "RSI (14)": f"{rsi_v:.1f}",
+            "ATR%": f"{atr_pct:.2f}%" if not np.isnan(atr_pct) else "N/A",
+            "Verimlilik Oranı": f"{eff_ratio:.2f}" if not np.isnan(eff_ratio) else "N/A",
+            "Hacim Oran": f"{vr:.2f}x" if not np.isnan(vr) else "N/A",
+        }
+        sc = sum(1 for p, _ in criteria.values() if p)
+        return sc, 6, criteria, details
+    except Exception as e:
+        return 0, 6, {"Hata": (False, str(e))}, {}
+
 STRATEGY_FN = {
     "emre": (score_emre, "Emre'nin Makro Stratejisi"),
-    "momentum": (score_momentum, "Momentum Kırılımcısı")
+    "momentum": (score_momentum, "Momentum Kırılımcısı"),
+    "claude": (score_claude, "Claude Stratejisi (Kalite Filtreli)"),
 }
+
+# Bazı stratejiler için minimum kalite eşiği ve hedef pozisyon aralığı.
+# Burada olmayan stratejiler (emre, momentum) eski davranışı korur: skora
+# bakılmaksızın her zaman tam 5 hisse seçilir. "claude" için eşiğin altında
+# kalan adaylar havuza hiç girmez; 4-5 arası pozisyon hedeflenir.
+STRATEGY_MIN_SCORE = {"claude": 4}
+STRATEGY_TARGET_RANGE = {"claude": (4, 5)}
+
+def _pick_portfolio(sorted_results, strategy, max_n=5, max_per_sector=2):
+    """Skor+RS'ye göre zaten sıralanmış sonuçlardan portföyü seçer.
+    Sektör başına en fazla `max_per_sector` hisse kuralı her zaman geçerlidir.
+    'claude' stratejisinde ek olarak minimum skor eşiği ve 4-5 pozisyon
+    hedefi uygulanır; diğerlerinde davranış değişmez."""
+    def _fill(pool, limit):
+        picked, sector_counts = [], {}
+        for r in pool:
+            sect = r.get('sector') or get_sector(r['ticker'])
+            if sector_counts.get(sect, 0) < max_per_sector:
+                picked.append(r); sector_counts[sect] = sector_counts.get(sect, 0) + 1
+            if len(picked) == limit: break
+        return picked
+
+    min_score = STRATEGY_MIN_SCORE.get(strategy)
+    if min_score is None:
+        return _fill(sorted_results, max_n)
+
+    target_min, target_max = STRATEGY_TARGET_RANGE.get(strategy, (max_n, max_n))
+    qualified = [r for r in sorted_results if r['score'] >= min_score]
+    picked = _fill(qualified, target_max)
+    if len(picked) < target_min:
+        relaxed = [r for r in sorted_results if r['score'] >= max(min_score - 1, 0)]
+        picked = _fill(relaxed, target_min)
+    return picked
 
 # ── 6. GRAFİKLER ──────────────────────────────────────────────────────────────
 def build_chart(df, ticker, interval):
@@ -415,6 +502,8 @@ with st.sidebar:
         st.session_state.update(strategy="emre", page="scanner", scan_done=False, results=[], selected_ticker=None); st.rerun()
     if st.button("🟣 Momentum Kırılımcısı", use_container_width=True):
         st.session_state.update(strategy="momentum", page="scanner", scan_done=False, results=[], selected_ticker=None); st.rerun()
+    if st.button("🔵 Claude Stratejisi", use_container_width=True):
+        st.session_state.update(strategy="claude", page="scanner", scan_done=False, results=[], selected_ticker=None); st.rerun()
 
 # ── 9. SAYFALAR ───────────────────────────────────────────────────────────────
 
@@ -504,8 +593,8 @@ elif st.session_state.page == "search":
         if st.button("Geri Dön"): st.session_state.page = "scanner"; st.rerun()
         st.stop()
 
-    c1, c2 = st.columns(2)
-    for col, sk in [(c1, "emre"), (c2, "momentum")]:
+    c1, c2, c3 = st.columns(3)
+    for col, sk in [(c1, "emre"), (c2, "momentum"), (c3, "claude")]:
         with col:
             fn, label = STRATEGY_FN[sk]
             st.markdown(f"### {label}")
@@ -633,8 +722,9 @@ elif st.session_state.page == "perf":
 
         bt_results={}
         prog=st.progress(0)
-        for i,sk in enumerate(["emre","momentum"]):
-            prog.progress((i+1)/2, text=f"{STRATEGY_FN[sk][1]} hesaplanıyor...")
+        strategies_to_run = ["emre","momentum","claude"]
+        for i,sk in enumerate(strategies_to_run):
+            prog.progress((i+1)/len(strategies_to_run), text=f"{STRATEGY_FN[sk][1]} hesaplanıyor...")
             pv,bm_n,trades,active,monthly = run_backtest(sk,stock_bt,bm_df_bt,tlref_weekly=tlref_bt)
             bt_results[sk] = {"pv":pv,"bm":bm_n,"trades":trades,"active":active,"monthly":monthly, "stats":calc_stats(pv,bm_n,100_000) if pv is not None else {}}
         prog.empty()
@@ -647,22 +737,36 @@ elif st.session_state.page == "perf":
         st.stop()
 
     st.markdown("### 📌 Bu Ay Aktif Portföyler")
-    c1,c2 = st.columns(2)
-    for col,sk in zip([c1,c2],["emre","momentum"]):
+    c1,c2,c3 = st.columns(3)
+    for col,sk in zip([c1,c2,c3],["emre","momentum","claude"]):
         with col:
             st.markdown(f"**{STRATEGY_FN[sk][1]}**")
-            for pos in sorted(bt_results[sk].get("active",[]),key=lambda x:x['pnl_pct'],reverse=True):
+            active_list = bt_results[sk].get("active",[])
+            st.caption(f"{len(active_list)} hisse")
+            for pos in sorted(active_list,key=lambda x:x['pnl_pct'],reverse=True):
                 pnl=pos['pnl_pct']; pc="#10b981" if pnl>=0 else "#ef4444"
                 st.markdown(f'<div class="mc"><div style="display:flex;justify-content:space-between"><span style="font-weight:700;color:#fff">{pos["ticker"]}</span><span style="color:{pc};font-family:JetBrains Mono;font-weight:600">{pnl:+.1f}%</span></div><div style="font-size:.75rem;color:#888;margin-top:.2rem">Ort. Maliyet: ₺{pos["buy_price"]:.2f} → Güncel: ₺{pos["current_price"]:.2f}</div></div>', unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("### 📈 Portföy Performansı vs BIST 100")
-    perf_map = {sk:(bt_results[sk]["pv"],bt_results[sk]["bm"]) for sk in ["emre","momentum"] if bt_results[sk].get("pv") is not None}
+    perf_map = {sk:(bt_results[sk]["pv"],bt_results[sk]["bm"]) for sk in ["emre","momentum","claude"] if bt_results[sk].get("pv") is not None}
     if perf_map: st.plotly_chart(build_perf_chart(perf_map,100_000), use_container_width=True, config={"displayModeBar":False})
 
+    st.markdown("### 📊 Özet İstatistikler")
+    stat_cols = st.columns(3)
+    for col, sk in zip(stat_cols, ["emre","momentum","claude"]):
+        with col:
+            st.markdown(f"**{STRATEGY_FN[sk][1]}**")
+            stats = bt_results[sk].get("stats", {})
+            if stats:
+                for k, v in stats.items():
+                    st.markdown(f'<div class="mc"><div class="ml">{k}</div><div class="mv">{v}</div></div>', unsafe_allow_html=True)
+            else:
+                st.info("Veri yok.")
+
     st.markdown("### 📅 Aylık Portföy ve Getiri Tablosu")
-    mt1, mt2 = st.tabs([STRATEGY_FN["emre"][1], STRATEGY_FN["momentum"][1]])
-    for tab, sk in zip([mt1, mt2], ["emre", "momentum"]):
+    mt1, mt2, mt3 = st.tabs([STRATEGY_FN["emre"][1], STRATEGY_FN["momentum"][1], STRATEGY_FN["claude"][1]])
+    for tab, sk in zip([mt1, mt2, mt3], ["emre", "momentum", "claude"]):
         with tab:
             m_df = bt_results[sk].get("monthly")
             if m_df is not None and not m_df.empty:
@@ -676,8 +780,8 @@ elif st.session_state.page == "perf":
                 st.info("Aylık tablo bulunamadı.")
 
     st.markdown("### 📋 İşlem Log Defteri (Rebalans Geçmişi)")
-    lt1,lt2 = st.tabs([STRATEGY_FN["emre"][1], STRATEGY_FN["momentum"][1]])
-    for tab,sk in zip([lt1,lt2],["emre","momentum"]):
+    lt1,lt2,lt3 = st.tabs([STRATEGY_FN["emre"][1], STRATEGY_FN["momentum"][1], STRATEGY_FN["claude"][1]])
+    for tab,sk in zip([lt1,lt2,lt3],["emre","momentum","claude"]):
         with tab:
             trades = bt_results[sk].get("trades")
             if trades is not None and not trades.empty:
@@ -712,14 +816,10 @@ elif st.session_state.page == "scanner":
                 results.append({ "ticker": ticker, "score": sc, "max_score": mx, "criteria": crit, "details": det, "df": df, "rs": rs if not np.isnan(rs) else -999, "sector": get_sector(ticker), "in_top5": False })
             
             results.sort(key=lambda x: (x['score'], x['rs']), reverse=True)
-            top5_count = 0; sector_counts = {}
+            selected = _pick_portfolio(results, strategy)
+            selected_tickers = {r['ticker'] for r in selected}
             for r in results:
-                sect = r['sector']
-                if top5_count < 5 and sector_counts.get(sect, 0) < 2:
-                    r['in_top5'] = True
-                    sector_counts[sect] = sector_counts.get(sect, 0) + 1
-                    top5_count += 1
-                else: r['in_top5'] = False
+                r['in_top5'] = r['ticker'] in selected_tickers
 
             st.session_state.results = results
             st.session_state.scan_done = True
@@ -736,7 +836,7 @@ elif st.session_state.page == "scanner":
     left_col, right_col = st.columns([1, 2.5], gap="large")
 
     with left_col:
-        st.markdown(f'<div class="sec-title">⭐ Top 5 ({len(top5_r)})</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="sec-title">⭐ Portföy ({len(top5_r)})</div>', unsafe_allow_html=True)
         for r in top5_r:
             lbl = r["ticker"].replace(".IS","")
             if st.button(f"⭐ {lbl} ({r['score']}/{r['max_score']})\n{r['sector'][:15]}", key=f"t5_{r['ticker']}", use_container_width=True):
