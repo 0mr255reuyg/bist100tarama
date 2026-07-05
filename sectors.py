@@ -12,11 +12,23 @@ import streamlit as st
 
 # 1. YEDEK LİSTE (FALLBACK) - Sistem canlı veriye ulaşamazsa (ya da henüz canlı
 #    kaynak bağlanmadığı için her zaman) burayı kullanır
+#
+# GÜNCELLEME (Borsa İstanbul 2026 3. çeyrek endeks revizyonu, 1 Temmuz 2026
+# itibarıyla geçerli): BIST 100'den çıkarılan AGHOL ve TABGD kaldırıldı;
+# endekse yeni giren ODINE, IEYHO ve ESEN eklendi. Ayrıca ISMEN (İş Yatırım
+# Menkul Değerler) "Katılım ve Evim Sistemleri"nden "Holding ve Yatırım"a
+# taşındı — ISMEN konvansiyonel bir aracı kurum, katılım endeksine uygun
+# değil (İş Bankası iştiraki). KTLEV ve INVES katılım-uyumlu oldukları
+# doğrulandığı için o grupta kaldı.
+# NOT: Bu liste ~100 hisseyi kapsar ama tam eşleşme garantisi yok; kalan
+# ~90+ tickerin sektör/endeks-üyeliği tek tek doğrulanmadı, sadece bu
+# revizyondaki somut değişiklikler ve şüpheli görünen 1-2 kayıt kontrol
+# edildi. Şüpheli bulursan tek tek doğrulayabiliriz.
 FALLBACK_SECTOR_MAP = {
     "AKBNK": "Banka", "GARAN": "Banka", "ISCTR": "Banka", "YKBNK": "Banka",
     "HALKB": "Banka", "VAKBN": "Banka", "TSKB": "Banka", "SKBNK": "Banka",
     "ALBRK": "Katılım ve Evim Sistemleri", "KTLEV": "Katılım ve Evim Sistemleri",
-    "ISMEN": "Katılım ve Evim Sistemleri", "INVES": "Katılım ve Evim Sistemleri",
+    "INVES": "Katılım ve Evim Sistemleri",
     "EKGYO": "İnşaat ve GMYO", "TRGYO": "İnşaat ve GMYO", "ISGYO": "İnşaat ve GMYO",
     "ZRGYO": "İnşaat ve GMYO", "SNGYO": "İnşaat ve GMYO", "AKGYO": "İnşaat ve GMYO",
     "OZGYO": "İnşaat ve GMYO",
@@ -25,15 +37,15 @@ FALLBACK_SECTOR_MAP = {
     "AKSEN": "Enerji", "ENJSA": "Enerji", "ASTOR": "Enerji", "GESAN": "Enerji", 
     "EUPWR": "Enerji", "CWENE": "Enerji", "ALFAS": "Enerji", "SMRTG": "Enerji", 
     "ZOREN": "Enerji", "CANTE": "Enerji", "ODAS": "Enerji", "GWIND": "Enerji",
-    "TUPRS": "Enerji",
+    "TUPRS": "Enerji", "ESEN": "Enerji",
     "BIMAS": "Gıda ve Perakende", "MGROS": "Gıda ve Perakende", "SOKM": "Gıda ve Perakende",
     "CCOLA": "Gıda ve Perakende", "AEFES": "Gıda ve Perakende", "ULKER": "Gıda ve Perakende",
-    "TATGD": "Gıda ve Perakende", "TUKAS": "Gıda ve Perakende", "TABGD": "Gıda ve Perakende",
+    "TATGD": "Gıda ve Perakende", "TUKAS": "Gıda ve Perakende",
     "KLRHO": "Gıda ve Perakende",
     "KCHOL": "Holding ve Yatırım", "SAHOL": "Holding ve Yatırım", "ALARK": "Holding ve Yatırım",
     "DOHOL": "Holding ve Yatırım", "ENKAI": "Holding ve Yatırım", "TKFEN": "Holding ve Yatırım",
-    "BERA": "Holding ve Yatırım", "AGHOL": "Holding ve Yatırım", "GSDHO": "Holding ve Yatırım",
-    "AHSY": "Holding ve Yatırım",
+    "BERA": "Holding ve Yatırım", "GSDHO": "Holding ve Yatırım",
+    "AHSY": "Holding ve Yatırım", "ISMEN": "Holding ve Yatırım", "IEYHO": "Holding ve Yatırım",
     "FROTO": "Otomotiv", "TOASO": "Otomotiv", "DOAS": "Otomotiv", "TTRAK": "Otomotiv",
     "OTKAR": "Otomotiv", "BRISA": "Otomotiv", "EGEEN": "Otomotiv",
     "ARCLK": "Sanayi ve Kimya", "VESTL": "Sanayi ve Kimya", "SASA": "Sanayi ve Kimya",
@@ -42,7 +54,7 @@ FALLBACK_SECTOR_MAP = {
     "OYAKC": "İnşaat Malzemeleri", "CIMSA": "İnşaat Malzemeleri", "AKCNS": "İnşaat Malzemeleri",
     "BTCIM": "İnşaat Malzemeleri", "BSOKE": "İnşaat Malzemeleri", "BOBET": "İnşaat Malzemeleri",
     "MIATK": "Teknoloji ve Yazılım", "ARDYZ": "Teknoloji ve Yazılım", "LOGO": "Teknoloji ve Yazılım",
-    "REEDR": "Teknoloji ve Yazılım", "ATATP": "Teknoloji ve Yazılım",
+    "REEDR": "Teknoloji ve Yazılım", "ATATP": "Teknoloji ve Yazılım", "ODINE": "Teknoloji ve Yazılım",
     "ASELS": "Savunma", "SDTTR": "Savunma",
     "THYAO": "Ulaşım ve Turizm", "PGSUS": "Ulaşım ve Turizm", "TAVHL": "Ulaşım ve Turizm",
     "TCELL": "İletişim", "TTKOM": "İletişim",
