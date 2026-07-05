@@ -236,18 +236,26 @@ def get_macro_regime():
         "ret_2m": ret_2m, "ret_1y": ret_1y, "is_plato": is_plato,
     })
 
+    # DÜZELTME (araştırmayla doğrulandı, backtest_engine.py'deki _REGIME_SECTOR_MAP
+    # ile birebir aynı): Bankacılık ve İnşaat/GMYO'nun asıl avantajı sıkılaşmada
+    # değil gevşemede çıkıyor — faiz düşünce bankaların fonlama maliyeti azalıyor,
+    # kredi hacmi büyüyor, tahvil portföylerinden değerleme kârı geliyor; GYO/İnşaat
+    # da ucuzlayan finansmandan besleniyor. Bu yüzden ikisi de "plato"dan "risk_on"a
+    # taşındı. Sıkılaşmada öne çıkan savunma sektörleri (gıda/perakende, iletişim,
+    # sağlık) zaten doğruydu, değişmedi.
     if is_plato:
         regime = "Denge (Plato)"
-        sectors = ["İnşaat ve GMYO", "İnşaat Malzemeleri", "Ulaşım ve Turizm"]
+        sectors = ["Ulaşım ve Turizm"]
     elif sma8 > sma54 and p_di > m_di and adx_val >= 20:
         regime = "Savunmacı (Risk Off — Faiz Yükseliyor)"
         sectors = ["Gıda ve Perakende", "İletişim", "Sağlık"]
     elif sma8 < sma54 and m_di > p_di and adx_val >= 20:
         regime = "Büyüme (Risk On — Faiz Düşüyor)"
-        sectors = ["Teknoloji ve Yazılım", "Enerji", "Otomotiv", "Sanayi ve Kimya"]
+        sectors = ["Banka", "İnşaat ve GMYO", "İnşaat Malzemeleri", "Holding ve Yatırım",
+                   "Otomotiv", "Sanayi ve Kimya", "Teknoloji ve Yazılım", "Enerji"]
     else:
         regime = "Denge (Plato)"
-        sectors = ["İnşaat ve GMYO", "İnşaat Malzemeleri", "Ulaşım ve Turizm"]
+        sectors = ["Ulaşım ve Turizm"]
 
     return regime, sectors, metrics
 
@@ -309,69 +317,79 @@ def score_momentum(df, bm_df, ticker=None):
     except Exception as e: return 0, 4, {"Hata": (False, str(e))}, {}
 
 def score_claude(df, bm_df, ticker=None):
-    """Claude Stratejisi — "kalıcılık + verimlilik" filtresi.
-    6 kriter: çoklu-onaylı trend yapısı, kalıcı (20g+60g) göreceli güç,
-    getiri/risk (ATR'ye göre) verimliliği, sağlıklı RSI bandı, hacim
-    katılımı ve gerçek TCMB faiz rejimine göre makro rüzgar.
-    NOT: Bu strateji, en az 4/6 kriteri geçmeyen adayları havuza hiç almaz
-    (bkz. STRATEGY_MIN_SCORE / _pick_portfolio) — zayıf ayda zorla 5 hisse
+    """Faiz Pusulası Stratejisi — TCMB faiz rejimini (gevşeme/sıkılaşma/nötr)
+    sektör tercihine bağlayan, kalite eleme + trend/göreceli güç skorlamalı
+    sistem. 7 kriter: temel trend, sağlıklı RSI bandı, 6 ay zirvesine
+    yakınlık, hacim teyidi, trend kalitesi (getiri/oynaklık oranı), 6 aylık
+    göreceli güç (BIST100'e göre), faiz rejimine sektörel uyum.
+    NOT: Bu strateji, en az 5/7 kriteri geçmeyen adayları havuza hiç
+    almaz (bkz. STRATEGY_MIN_SCORE / _pick_portfolio) — zayıf ayda zorla 5 hisse
     doldurmaz, 4-5 arası pozisyon hedefler."""
     try:
         c = _c(df); h = _h(df); l = _l(df); v = _v(df)
-        if len(c) < 55: return 0, 6, {}, {}
+        if len(c) < 55: return 0, 7, {}, {}
         bm = _c(bm_df) if not bm_df.empty else pd.Series(dtype=float)
 
         price = float(c.iloc[-1])
-        sma50_s = sma(c, 50)
-        s50 = float(sma50_s.iloc[-1])
-        sma50_valid = sma50_s.dropna()
-        s50_prev = float(sma50_valid.iloc[-6]) if len(sma50_valid) > 6 else np.nan
+        s50 = float(sma(c, 50).iloc[-1])
         rsi_v = float(rsi_calc(c).iloc[-1])
-        rs20 = rs_score(c, bm, 20)
-        rs60 = rs_score(c, bm, 60)
-        vr = vol_ratio(v, 20)
 
-        a14 = atr_calc(h, l, c)
-        atr_now = float(a14.dropna().iloc[-1]) if len(a14.dropna()) > 0 else np.nan
-        atr_pct = (atr_now / price * 100) if (not np.isnan(atr_now) and price > 0) else np.nan
-        ret_20 = (price / float(c.iloc[-21]) - 1) * 100 if len(c) > 21 else np.nan
-        eff_ratio = (ret_20 / (atr_pct * (20 ** 0.5))) if (not np.isnan(atr_pct) and atr_pct > 0 and not np.isnan(ret_20)) else np.nan
+        # Son 6 ayın (mevcut olan kadarının) zirvesine uzaklık
+        lookback_peak = min(len(c), 126)
+        high_6m = float(c.iloc[-lookback_peak:].max())
+        dist_from_high = ((high_6m - price) / high_6m * 100) if high_6m > 0 else np.nan
+
+        # Hacim teyidi: 20 günlük ortalama, 3 aylık (63g) ortalamanın altına düşmemiş mi
+        avg_vol_20 = float(v.iloc[-20:].mean()) if len(v) >= 20 else np.nan
+        avg_vol_63 = float(v.iloc[-63:].mean()) if len(v) >= 63 else np.nan
+        vol_confirm = (not np.isnan(avg_vol_20)) and (not np.isnan(avg_vol_63)) and \
+                      avg_vol_63 > 0 and avg_vol_20 >= avg_vol_63
+        vr_display = (avg_vol_20 / avg_vol_63) if (not np.isnan(avg_vol_20) and not np.isnan(avg_vol_63) and avg_vol_63 > 0) else np.nan
+
+        # Trend Kalitesi: 3 aylık (63g) getiri / 3 aylık günlük getiri oynaklığı
+        ret_63 = (price / float(c.iloc[-64]) - 1) * 100 if len(c) > 64 else np.nan
+        daily_rets_63 = c.pct_change().iloc[-63:] if len(c) > 64 else pd.Series(dtype=float)
+        vol_63 = float(daily_rets_63.std() * 100) if len(daily_rets_63.dropna()) > 10 else np.nan
+        trend_quality = (ret_63 / (vol_63 * (63 ** 0.5))) \
+            if (not np.isnan(vol_63) and vol_63 > 0 and not np.isnan(ret_63)) else np.nan
+
+        # Göreceli Güç: 6 aylık (126g) BIST100'e göre relatif getiri
+        rs_180 = rs_score(c, bm, 126)
 
         sector = get_sector(ticker) if ticker else ""
         is_macro_aligned = sector in REGIME_SECTORS
-        trend_ok = (not np.isnan(s50_prev)) and price > s50 and s50 > s50_prev
-        rs_ok = (not np.isnan(rs20) and rs20 > 0) and (not np.isnan(rs60) and rs60 > 0)
 
         criteria = {
-            "Trend Yapısı Onaylı (Fiyat>SMA50, SMA50↑)": (trend_ok, f"{price:.2f} > {s50:.2f} ({'yükseliyor' if not np.isnan(s50_prev) and s50>s50_prev else 'yatay/düşüyor'})"),
-            "Kalıcı Göreceli Güç (RS20 & RS60 +)": (rs_ok, f"RS20={rs20*100:+.1f}% RS60={rs60*100:+.1f}%" if not np.isnan(rs20) and not np.isnan(rs60) else "N/A"),
-            "Getiri/Risk Verimliliği (20g)": (not np.isnan(eff_ratio) and eff_ratio > 0.3, f"{eff_ratio:.2f}" if not np.isnan(eff_ratio) else "N/A"),
-            "Sağlıklı RSI Bandı (45-72)": (45 <= rsi_v <= 72, f"RSI={rsi_v:.1f}"),
-            "Hacim Katılımı (≥1.0x Ort.)": (not np.isnan(vr) and vr >= 1.0, f"{vr:.2f}x" if not np.isnan(vr) else "N/A"),
-            "Makro Rüzgar (TCMB Faiz Rejimi)": (is_macro_aligned, f"{sector} ({CURRENT_REGIME})"),
+            "Temel Trend (Fiyat > SMA50)": (price > s50, f"{price:.2f} > {s50:.2f}"),
+            "Sağlıklı RSI (40-70)": (not np.isnan(rsi_v) and 40 <= rsi_v <= 70, f"RSI={rsi_v:.1f}"),
+            "6 Ay Zirvesine Yakınlık (≤%20)": (not np.isnan(dist_from_high) and dist_from_high <= 20, f"{dist_from_high:.1f}%" if not np.isnan(dist_from_high) else "N/A"),
+            "Hacim Teyidi (20g ≥ 3 Aylık Ort.)": (vol_confirm, f"{vr_display:.2f}x" if not np.isnan(vr_display) else "N/A"),
+            "Trend Kalitesi (Getiri/Oynaklık)": (not np.isnan(trend_quality) and trend_quality > 0.3, f"{trend_quality:.2f}" if not np.isnan(trend_quality) else "N/A"),
+            "6 Aylık Göreceli Güç (vs BIST100)": (not np.isnan(rs_180) and rs_180 > 0, f"{rs_180*100:+.1f}%" if not np.isnan(rs_180) else "N/A"),
+            "Faiz Rejimi Uyumu": (is_macro_aligned, f"{sector} ({CURRENT_REGIME})"),
         }
         details = {
             "Fiyat": f"{price:.2f} ₺", "SMA 50": f"{s50:.2f}", "RSI (14)": f"{rsi_v:.1f}",
-            "ATR%": f"{atr_pct:.2f}%" if not np.isnan(atr_pct) else "N/A",
-            "Verimlilik Oranı": f"{eff_ratio:.2f}" if not np.isnan(eff_ratio) else "N/A",
-            "Hacim Oran": f"{vr:.2f}x" if not np.isnan(vr) else "N/A",
+            "6A Zirveye Uzaklık": f"{dist_from_high:.1f}%" if not np.isnan(dist_from_high) else "N/A",
+            "Trend Kalitesi": f"{trend_quality:.2f}" if not np.isnan(trend_quality) else "N/A",
+            "6A Göreceli Güç": f"{rs_180*100:+.1f}%" if not np.isnan(rs_180) else "N/A",
         }
         sc = sum(1 for p, _ in criteria.values() if p)
-        return sc, 6, criteria, details
+        return sc, 7, criteria, details
     except Exception as e:
-        return 0, 6, {"Hata": (False, str(e))}, {}
+        return 0, 7, {"Hata": (False, str(e))}, {}
 
 STRATEGY_FN = {
     "emre": (score_emre, "Emre'nin Makro Stratejisi"),
     "momentum": (score_momentum, "Momentum Kırılımcısı"),
-    "claude": (score_claude, "Claude Stratejisi (Kalite Filtreli)"),
+    "claude": (score_claude, "Faiz Pusulası Stratejisi"),
 }
 
 # Bazı stratejiler için minimum kalite eşiği ve hedef pozisyon aralığı.
 # Burada olmayan stratejiler (emre, momentum) eski davranışı korur: skora
 # bakılmaksızın her zaman tam 5 hisse seçilir. "claude" için eşiğin altında
 # kalan adaylar havuza hiç girmez; 4-5 arası pozisyon hedeflenir.
-STRATEGY_MIN_SCORE = {"claude": 4}
+STRATEGY_MIN_SCORE = {"claude": 5}
 STRATEGY_TARGET_RANGE = {"claude": (4, 5)}
 
 def _pick_portfolio(sorted_results, strategy, max_n=5, max_per_sector=2):
@@ -502,7 +520,7 @@ with st.sidebar:
         st.session_state.update(strategy="emre", page="scanner", scan_done=False, results=[], selected_ticker=None); st.rerun()
     if st.button("🟣 Momentum Kırılımcısı", use_container_width=True):
         st.session_state.update(strategy="momentum", page="scanner", scan_done=False, results=[], selected_ticker=None); st.rerun()
-    if st.button("🔵 Claude Stratejisi", use_container_width=True):
+    if st.button("🔵 Faiz Pusulası Stratejisi", use_container_width=True):
         st.session_state.update(strategy="claude", page="scanner", scan_done=False, results=[], selected_ticker=None); st.rerun()
 
 # ── 9. SAYFALAR ───────────────────────────────────────────────────────────────
