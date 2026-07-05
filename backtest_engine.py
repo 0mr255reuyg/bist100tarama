@@ -48,7 +48,7 @@ def _month_starts(index, start, end):
 # Burada olmayan stratejiler (emre, momentum) eski davranışı korur: skora
 # bakılmaksızın her zaman tam top_n (5) hisse seçilir. "claude" için eşiğin
 # altında kalan adaylar havuza hiç girmez; 4-5 arası pozisyon hedeflenir.
-STRATEGY_MIN_SCORE = {"claude": 4}
+STRATEGY_MIN_SCORE = {"claude": 5}
 STRATEGY_TARGET_RANGE = {"claude": (4, 5)}
 
 def _pick_candidates(candidates, strategy, top_n=5, max_per_sector=2):
@@ -83,10 +83,19 @@ def _pick_candidates(candidates, strategy, top_n=5, max_per_sector=2):
 # hesaplanır ki backtest, canlı stratejiyle tutarlı bir "makro rüzgar" kriteri
 # kullansın. tlref_weekly verilmezse (ör. EVDS API key yoksa) None döner ve
 # _score_at basit fiyat-trend proxy'sine düşer.
+#
+# DÜZELTME (araştırmayla doğrulandı): Bankacılık ve İnşaat/GMYO'nun asıl
+# avantajı SIKILAŞMADA değil GEVŞEMEDE çıkıyor — faiz düşünce bankaların
+# fonlama maliyeti azalıyor, kredi hacmi büyüyor, tahvil portföylerinden
+# değerleme kârı geliyor; GYO/İnşaat da ucuzlayan finansmandan ve konut
+# talebinden besleniyor. Bu yüzden ikisi de "plato"dan "risk_on"a taşındı.
+# Sıkılaşmada öne çıkanlar savunma karakterli sektörler (gıda/perakende,
+# iletişim, sağlık) — bu kısım zaten doğruydu, değişmedi.
 _REGIME_SECTOR_MAP = {
     "risk_off": ["Gıda ve Perakende", "İletişim", "Sağlık"],
-    "risk_on":  ["Teknoloji ve Yazılım", "Enerji", "Otomotiv", "Sanayi ve Kimya"],
-    "plato":    ["İnşaat ve GMYO", "İnşaat Malzemeleri", "Ulaşım ve Turizm"],
+    "risk_on":  ["Banka", "İnşaat ve GMYO", "İnşaat Malzemeleri", "Holding ve Yatırım",
+                 "Otomotiv", "Sanayi ve Kimya", "Teknoloji ve Yazılım", "Enerji"],
+    "plato":    ["Ulaşım ve Turizm"],
 }
 
 def _calc_adx_hist(h, l, c, n=14):
@@ -127,7 +136,7 @@ def _regime_sectors_at(tlref_weekly, date):
 
 # ── 2. KRİTER SKORU (GEÇMİŞ TARİH İÇİN) ───────────────────────────────────────
 def _max_score_for(strategy):
-    return {"emre": 5, "momentum": 4, "claude": 6}.get(strategy, 5)
+    return {"emre": 5, "momentum": 4, "claude": 7}.get(strategy, 5)
 
 def _score_at(strategy, df, bm_df, date, ticker=None, regime_sectors=None):
     try:
@@ -180,42 +189,50 @@ def _score_at(strategy, df, bm_df, date, ticker=None, regime_sectors=None):
             return sum(checks), 4
 
         elif strategy == "claude":
-            # Claude Stratejisi — canlı score_claude (app.py) ile birebir aynı 6 kriter:
-            # çoklu-onaylı trend yapısı, kalıcı (20g+60g) RS, getiri/risk verimliliği,
-            # sağlıklı RSI bandı, hacim katılımı, gerçek TLREF/TCMB rejimine göre makro rüzgar.
-            sma50_hist = _sma(c_s, 50)
-            sma50_valid = sma50_hist.dropna()
-            if len(sma50_valid) < 7:
-                return 0, 6
-            s50 = float(sma50_hist.iloc[-1])
-            s50_prev = float(sma50_valid.iloc[-6])
+            # Faiz Pusulası Stratejisi — TCMB faiz rejimini (gevşeme/sıkılaşma/nötr)
+            # sektör tercihine bağlayan, kalite eleme + trend/göreceli güç skorlamalı
+            # sistem. 7 kriter: temel trend, sağlıklı RSI bandı, 6 ay zirvesine
+            # yakınlık, hacim teyidi, trend kalitesi (getiri/oynaklık oranı),
+            # 6 aylık göreceli güç (BIST100'e göre), faiz rejimine sektörel uyum.
+            s50 = float(_sma(c_s, 50).iloc[-1])
             rsi_v = float(_rsi(c_s).iloc[-1])
-            rs20 = _rs_at(c_s, bm, date, days=20)
-            rs60 = _rs_at(c_s, bm, date, days=60)
-            a14 = _atr(h_s, lo_s, c_s)
-            atr_now = float(a14.iloc[-1])
-            atr_pct = (atr_now / price * 100) if price > 0 else np.nan
-            ret_20 = (price / float(c_s.iloc[-21]) - 1) * 100 if len(c_s) > 21 else np.nan
-            eff_ratio = (ret_20 / (atr_pct * (20 ** 0.5))) if (not np.isnan(atr_pct) and atr_pct > 0 and not np.isnan(ret_20)) else np.nan
+
+            # Son 6 ayın (mevcut olan kadarının) zirvesine uzaklık
+            lookback_peak = min(len(c_s), 126)
+            high_6m = float(c_s.iloc[-lookback_peak:].max())
+            dist_from_high = ((high_6m - price) / high_6m * 100) if high_6m > 0 else np.nan
+
+            # Hacim teyidi: 20 günlük ortalama, 3 aylık (63g) ortalamanın altına düşmemiş mi
+            avg_vol_20 = float(v_s.iloc[-20:].mean()) if len(v_s) >= 20 else np.nan
+            avg_vol_63 = float(v_s.iloc[-63:].mean()) if len(v_s) >= 63 else np.nan
+            vol_confirm = (not np.isnan(avg_vol_20)) and (not np.isnan(avg_vol_63)) and \
+                          avg_vol_63 > 0 and avg_vol_20 >= avg_vol_63
+
+            # Trend Kalitesi: 3 aylık (63g) getiri / 3 aylık günlük getiri oynaklığı
+            ret_63 = (price / float(c_s.iloc[-64]) - 1) * 100 if len(c_s) > 64 else np.nan
+            daily_rets_63 = c_s.pct_change().iloc[-63:] if len(c_s) > 64 else pd.Series(dtype=float)
+            vol_63 = float(daily_rets_63.std() * 100) if len(daily_rets_63.dropna()) > 10 else np.nan
+            trend_quality = (ret_63 / (vol_63 * (63 ** 0.5))) \
+                if (not np.isnan(vol_63) and vol_63 > 0 and not np.isnan(ret_63)) else np.nan
+
+            # Göreceli Güç: 6 aylık (126g) BIST100'e göre bileşik relatif getiri
+            rs_180 = _rs_at(c_s, bm, date, days=126)
 
             if regime_sectors is not None and ticker is not None:
                 macro_ok = get_sector(ticker) in regime_sectors
             else:
-                macro_ok = price > s50  # TLREF verisi yoksa basit proxy
-
-            trend_ok = price > s50 and s50 > s50_prev
-            rs_ok = (rs20 is not None and not np.isnan(rs20) and rs20 > 0) and \
-                    (rs60 is not None and not np.isnan(rs60) and rs60 > 0)
+                macro_ok = price > s50  # rejim verisi yoksa basit fiyat-trend proxy'si
 
             checks = [
-                trend_ok,
-                rs_ok,
-                (not np.isnan(eff_ratio)) and eff_ratio > 0.3,
-                45 <= rsi_v <= 72,
-                (not np.isnan(vr)) and vr >= 1.0,
+                price > s50,
+                (not np.isnan(rsi_v)) and 40 <= rsi_v <= 70,
+                (not np.isnan(dist_from_high)) and dist_from_high <= 20,
+                vol_confirm,
+                (not np.isnan(trend_quality)) and trend_quality > 0.3,
+                (rs_180 is not None) and (not np.isnan(rs_180)) and rs_180 > 0,
                 macro_ok,
             ]
-            return sum(checks), 6
+            return sum(checks), 7
 
     except Exception:
         pass
@@ -368,7 +385,7 @@ def calc_stats(pv_df, bm_norm, start_capital):
     return {'Toplam Getiri': f"{total:+.1f}%", 'CAGR': f"{cagr:+.1f}%", 'Max Drawdown': f"{max_dd:.1f}%", 'BIST100 Getirisi': f"{bm_ret:+.1f}%" if bm_ret is not None else 'N/A', 'Alpha': f"{alpha:+.1f}%" if alpha is not None else 'N/A', 'Son Değer': f"₺{pv.iloc[-1]:,.0f}"}
 
 STRAT_COLORS = { 'emre': '#f59e0b', 'momentum': '#a78bfa', 'claude': '#38bdf8' }
-STRAT_LABELS = { 'emre': "🟠 Emre'nin Makro Stratejisi", 'momentum': '🟣 Momentum', 'claude': '🔵 Claude Stratejisi' }
+STRAT_LABELS = { 'emre': "🟠 Emre'nin Makro Stratejisi", 'momentum': '🟣 Momentum', 'claude': '🔵 Faiz Pusulası Stratejisi' }
 
 def build_perf_chart(results_map, start_capital):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.68, 0.32], vertical_spacing=0.04)
