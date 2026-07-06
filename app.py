@@ -12,7 +12,8 @@ warnings.filterwarnings('ignore')
 from backtest_engine import run_backtest, calc_stats, build_perf_chart, STRAT_LABELS, STRAT_COLORS
 from sectors import (get_sector, get_theme_sectors, get_theme_info,
                      MACRO_THEMES, MACRO_THEMES_PRIMARY, MACRO_THEMES_SECONDARY,
-                     SECTOR_MAP, BIST100_OFFICIAL, ALL_SECTORS)
+                     SECTOR_MAP, ALL_SECTORS)
+from membership import get_current_constituents, get_all_tickers_ever, check_for_updates_via_borsapy
 from sector_summary import build_summary, build_sector_bar_chart, _sector_returns
 
 # ── 1. MINIMAL UI AYARLARI ───────────────────────────────────────────────────
@@ -43,7 +44,24 @@ div[data-testid="stButton"] button[data-testid="baseButton-primary"]:hover { bac
 </style>
 """, unsafe_allow_html=True)
 
-BIST100_YF = [t+".IS" for t in BIST100_OFFICIAL]
+# CANLI TARAMA EVRENİ: şu anki gerçek BIST100 üyeliği (membership.py'den).
+# sectors.BIST100_OFFICIAL yerine bunu kullanıyoruz çünkü artık üyelik/zamanlama
+# konusunda tek doğru kaynak membership.py; sectors.py sadece sektör etiketleme
+# için var (bkz. sectors.py başındaki not).
+BIST100_YF = [t+".IS" for t in get_current_constituents()]
+
+# BACKTEST EVRENİ: sadece bugünün değil, HİÇ BIST100'de bulunmuş TÜM ticker'lar.
+# backtest_engine.py'deki nokta-zamanlı filtre bu geniş evrenden, her rebalans
+# tarihinde o tarihte fiilen üye olanları seçer. Bugünün ~100'ünü kullansaydık
+# AGHOL/TABGD/BERA/SDTTR gibi geçmişte üye olup bugün çıkmış hisselerin fiyat
+# verisi hiç çekilmemiş olurdu ve backtest o dönemler için yine yanlış kalırdı.
+BIST100_ALL_TIME_YF = [t+".IS" for t in get_all_tickers_ever()]
+
+# Her açılışta: canlı kaynakla (borsapy) son kayıtlı membership.py dönemini
+# kıyaslar. Fark varsa (yeni bir çeyreklik revizyon olmuş demektir) uyarı
+# metni döner; otomatik güncelleme YAPMAZ, sadece haber verir. borsapy
+# kurulu değilse/API farklıysa sessizce None döner, uygulamayı durdurmaz.
+REVISION_WARNING = check_for_updates_via_borsapy()
 
 # ── 2. VERİ ÇEKME ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -480,6 +498,8 @@ def render_detail(result, strategy, interval):
 # ── 7. UYGULAMA YÜKLEME VE SESSION STATE ──────────────────────────────────────
 st.markdown('<div class="main-header">BIST Makro Tarayıcı</div>', unsafe_allow_html=True)
 st.markdown(f'<div class="sub-header">{datetime.now().strftime("%d.%m.%Y")} · {len(BIST100_YF)} Hisse</div>', unsafe_allow_html=True)
+if REVISION_WARNING:
+    st.warning(f"⚠️ {REVISION_WARNING}")
 
 defaults = {"strategy":"emre", "selected_ticker":None, "scan_done":False, "results":[], "page":"scanner", "bt_done":False, "bt_results":{}}
 for k,v in defaults.items():
@@ -731,12 +751,12 @@ elif st.session_state.page == "perf":
     st.markdown("---")
 
     if st.button("▶️ Backtest Çalıştır", type="primary"):
-        with st.spinner("2 yıllık veri çekiliyor ve simülasyon hesaplanıyor..."):
-            bm_df_bt = fetch_benchmark("2y","1d")
-            stock_bt = fetch_data(BIST100_YF,"2y","1d")
+        with st.spinner("Tüm zamanların BIST100 evreni çekiliyor ve simülasyon hesaplanıyor..."):
+            bm_df_bt = fetch_benchmark("3y","1d")
+            stock_bt = fetch_data(BIST100_ALL_TIME_YF,"3y","1d")
             tlref_bt, tlref_bt_source = get_tlref_weekly()
 
-        st.caption(f"Makro rüzgar kriteri için kullanılan faiz kaynağı: **{tlref_bt_source}**")
+        st.caption(f"Evren: {len(BIST100_ALL_TIME_YF)} ticker (hiç BIST100'de bulunmuş tüm hisseler) · Makro rüzgar kriteri için kullanılan faiz kaynağı: **{tlref_bt_source}**")
 
         bt_results={}
         prog=st.progress(0)
