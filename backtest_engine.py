@@ -1,12 +1,19 @@
 """
 Backtest Engine — BIST 100 Strateji Tarayıcı
 Kümülatif Eşit Ağırlıklı Rebalans ve İşlem Log Defteri Entegrasyonu
+
+NOKTA-ZAMANLI ÜYELİK (membership.py): Her rebalans tarihinde aday havuzu,
+o TARİHTE fiilen BIST100 üyesi olan hisselerle sınırlanır (survivorship /
+point-in-time bias düzeltmesi). stock_data'nın bunun işe yaraması için
+membership.get_all_tickers_ever() evrenini (sadece bugünün ~100'ünü değil)
+içermesi gerekir — bu app.py'nin veri çekme kısmında sağlanır.
 """
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from sectors import get_sector
+from membership import get_constituents_at
 
 # ── 1. İNDİKATÖRLER VE YARDIMCI FONKSİYONLAR ──────────────────────────────────
 def _sma(s, n):  return s.rolling(n).mean()
@@ -268,9 +275,22 @@ def run_backtest(strategy, stock_data, benchmark_df, tlref_weekly=None, start_ca
         # 1b. Bu rebalans tarihindeki TLREF makro rejimi (tüm hisseler için ortak)
         regime_sectors = _regime_sectors_at(tlref_weekly, rdate)
 
+        # 1c. NOKTA-ZAMANLI FİLTRE (survivorship/point-in-time bias düzeltmesi):
+        # Bu rebalans tarihinde FİİLEN BIST100 üyesi olan ticker'lar. membership.py
+        # olmadan önce burada TÜM stock_data (yani BUGÜNÜN ~100 hissesi) taranıyordu
+        # — bu da bugün endekste olan ama o tarihte olmayan hisseleri "varmış gibi"
+        # alıyor, o tarihte gerçekten üye olup bugün endeksten çıkmış hisseleri
+        # (AGHOL, TABGD, BERA, SDTTR gibi) ise o dönemler için hiç yokmuş gibi
+        # gösteriyordu. NOT: Bunun işe yaraması için stock_data'nın BUGÜNÜN değil,
+        # get_all_tickers_ever() (membership.py) evreninin fiyat verisini içermesi
+        # gerekir — bu kısım app.py'de düzeltilecek.
+        point_in_time_members = set(get_constituents_at(rdate))
+
         # 2. Hisse Havuzunu Tara ve Puanla
         candidates = []
         for tkr, df in stock_data.items():
+            if tkr.replace(".IS", "") not in point_in_time_members:
+                continue  # bu tarihte BIST100 üyesi değildi -> havuza hiç girmez
             if df is None or len(df) < 55: continue
             sc, mx = _score_at(strategy, df, benchmark_df, rdate, ticker=tkr, regime_sectors=regime_sectors)
             c = df['Close'].squeeze()
