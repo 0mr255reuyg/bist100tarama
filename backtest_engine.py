@@ -101,7 +101,8 @@ def _pick_candidates(candidates, strategy, top_n=5, max_per_sector=2):
 _REGIME_SECTOR_MAP = {
     "risk_off": ["Gıda ve Perakende", "İletişim", "Sağlık"],
     "risk_on":  ["Banka", "İnşaat ve GMYO", "İnşaat Malzemeleri", "Holding ve Yatırım",
-                 "Otomotiv", "Sanayi ve Kimya", "Teknoloji ve Yazılım", "Enerji"],
+                 "Otomotiv", "Sanayi ve Kimya", "Teknoloji ve Yazılım", "Enerji",
+                 "Finansal Kiralama ve Faktoring"],
     "plato":    ["Ulaşım ve Turizm"],
 }
 
