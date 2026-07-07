@@ -45,22 +45,14 @@ div[data-testid="stButton"] button[data-testid="baseButton-primary"]:hover { bac
 """, unsafe_allow_html=True)
 
 # CANLI TARAMA EVRENİ: şu anki gerçek BIST100 üyeliği (membership.py'den).
-# sectors.BIST100_OFFICIAL yerine bunu kullanıyoruz çünkü artık üyelik/zamanlama
-# konusunda tek doğru kaynak membership.py; sectors.py sadece sektör etiketleme
-# için var (bkz. sectors.py başındaki not).
 BIST100_YF = [t+".IS" for t in get_current_constituents()]
 
 # BACKTEST EVRENİ: sadece bugünün değil, HİÇ BIST100'de bulunmuş TÜM ticker'lar.
-# backtest_engine.py'deki nokta-zamanlı filtre bu geniş evrenden, her rebalans
-# tarihinde o tarihte fiilen üye olanları seçer. Bugünün ~100'ünü kullansaydık
-# AGHOL/TABGD/BERA/SDTTR gibi geçmişte üye olup bugün çıkmış hisselerin fiyat
-# verisi hiç çekilmemiş olurdu ve backtest o dönemler için yine yanlış kalırdı.
 BIST100_ALL_TIME_YF = [t+".IS" for t in get_all_tickers_ever()]
 
 # Her açılışta: canlı kaynakla (borsapy) son kayıtlı membership.py dönemini
 # kıyaslar. Fark varsa (yeni bir çeyreklik revizyon olmuş demektir) uyarı
-# metni döner; otomatik güncelleme YAPMAZ, sadece haber verir. borsapy
-# kurulu değilse/API farklıysa sessizce None döner, uygulamayı durdurmaz.
+# metni döner; otomatik güncelleme YAPMAZ, sadece haber verir.
 REVISION_WARNING = check_for_updates_via_borsapy()
 
 # ── 2. VERİ ÇEKME ─────────────────────────────────────────────────────────────
@@ -104,19 +96,6 @@ def fetch_benchmark(period, interval):
     return pd.DataFrame()
 
 # ── 2b. TLREF (TCMB EVDS) ─────────────────────────────────────────────────────
-# TLREF, BIST'i doğrudan etkileyen TL referans faizidir. TLREF fiilen TCMB'nin
-# gecelik (O/N) faiz koridoruna çok yakın seyreder. Önceki denemede EVDS'den
-# çekilen "TP.BISTTLREF.*" serisinin aslında bir ORAN değil, 2019'dan beri
-# bileşik büyüyen bir ENDEKS (BIST TLREF Endeksi) olduğu ortaya çıktı — bu
-# yüzden %6000+ gibi anlamsız değerler geliyordu. Onun yerine borsapy'nin
-# `bp.TCMB()` sınıfı üzerinden TCMB'nin gerçek gecelik (O/N) faiz koridorunu
-# (yüzde olarak, örn. %46.0) kullanıyoruz. Bu veri EVDS'den değil, TCMB'nin
-# kendi faiz sayfasından geldiği için API ANAHTARI GEREKMEZ.
-# Politika faizi MPC toplantı tarihlerinde değişip aralarda sabit kaldığından,
-# günlük indekse ileri doldurularak (ffill) yayılır, sonra haftalık muma çevrilir.
-# TCMB kaynağına herhangi bir sebeple ulaşılamazsa ^TNX (ABD 10Y tahvil) yön-
-# fikri proxy'sine düşülür ve kullanıcıya bu açıkça bildirilir.
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_tl_rate_daily():
     """TCMB'nin gerçek gecelik (O/N) borç verme faizini (yüzde) günlük olarak
@@ -139,9 +118,7 @@ def fetch_tl_rate_daily():
         return pd.Series(dtype=float)
 
 def _weekly_ohlc_from_series(s):
-    """Günlük bir oran serisinden haftalık mum (OHLC) üretir. Faiz toplantı
-    tarihleri arasında sabit kaldığından çoğu hafta düz mum olur; bu normaldir
-    ve trend/rejim tespiti için yeterlidir."""
+    """Günlük bir oran serisinden haftalık mum (OHLC) üretir."""
     if s is None or s.empty:
         return pd.DataFrame()
     w = s.resample("W-FRI").agg(["first", "max", "min", "last"])
@@ -150,8 +127,7 @@ def _weekly_ohlc_from_series(s):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_macro_rate_fallback():
-    """Gerçek faiz verisine ulaşılamadığında kullanılan yedek proxy (^TNX).
-    NOT: Bu sadece kaba bir yön fikri verir, TL faiz ortamını birebir yansıtmaz."""
+    """Gerçek faiz verisine ulaşılamadığında kullanılan yedek proxy (^TNX)."""
     df = yf.download("^TNX", period="5y", interval="1wk", auto_adjust=True, progress=False)
     if df is not None and len(df) > 55:
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
@@ -222,14 +198,6 @@ def calc_adx(h, l, c, n=14):
 
 # ── 4. MAKRO REJİM MOTORU ─────────────────────────────────────────────────────
 def get_macro_regime():
-    """
-    Haftalık TL faiz (veya proxy) verisi üzerinden:
-      - SMA 8 / SMA 54 ile trend yönü
-      - ADX + D+/D- ile trend gücü ve yönü
-      - 2 aylık (~9 hafta) ve 1 yıllık (~52 hafta) getiri ile faiz yükseliyor mu / düşüyor mu
-      - "Plato" (yatay/kararsız) durumunu ayrıca tespit eder
-    döndürür.
-    """
     df_rate, source = get_tlref_weekly()
     metrics = {"source": source, "is_plato": False}
     if df_rate.empty or len(df_rate) < 55:
@@ -242,8 +210,8 @@ def get_macro_regime():
     adx_val = float(adx.iloc[-1]); p_di = float(plus_di.iloc[-1]); m_di = float(minus_di.iloc[-1])
 
     last_val = float(c.iloc[-1])
-    ret_2m = (last_val / float(c.iloc[-9]) - 1) if len(c) > 9 else np.nan     # ~9 hafta ≈ 2 ay
-    ret_1y = (last_val / float(c.iloc[-53]) - 1) if len(c) > 53 else np.nan  # 52 hafta ≈ 1 yıl
+    ret_2m = (last_val / float(c.iloc[-9]) - 1) if len(c) > 9 else np.nan
+    ret_1y = (last_val / float(c.iloc[-53]) - 1) if len(c) > 53 else np.nan
 
     spread_pct = abs(sma8 - sma54) / sma54 * 100 if sma54 else 0.0
     is_plato = spread_pct < 3 and adx_val < 20
@@ -254,13 +222,6 @@ def get_macro_regime():
         "ret_2m": ret_2m, "ret_1y": ret_1y, "is_plato": is_plato,
     })
 
-    # DÜZELTME (araştırmayla doğrulandı, backtest_engine.py'deki _REGIME_SECTOR_MAP
-    # ile birebir aynı): Bankacılık ve İnşaat/GMYO'nun asıl avantajı sıkılaşmada
-    # değil gevşemede çıkıyor — faiz düşünce bankaların fonlama maliyeti azalıyor,
-    # kredi hacmi büyüyor, tahvil portföylerinden değerleme kârı geliyor; GYO/İnşaat
-    # da ucuzlayan finansmandan besleniyor. Bu yüzden ikisi de "plato"dan "risk_on"a
-    # taşındı. Sıkılaşmada öne çıkan savunma sektörleri (gıda/perakende, iletişim,
-    # sağlık) zaten doğruydu, değişmedi.
     if is_plato:
         regime = "Denge (Plato)"
         sectors = ["Ulaşım ve Turizm"]
@@ -309,32 +270,6 @@ def score_emre(df, bm_df, ticker=None):
         return sc, 5, criteria, details
     except Exception as e: return 0, 5, {"Hata": (False, str(e))}, {}
 
-def score_momentum(df, bm_df, ticker=None):
-    try:
-        c = _c(df); h = _h(df); l = _l(df); v = _v(df)
-        if len(c) < 55: return 0, 4, {}, {}
-
-        price = float(c.iloc[-1])
-        s50 = float(sma(c,50).iloc[-1])
-        ml, sl, hl = macd_calc(c)
-        hn = float(hl.dropna().iloc[-1]) if len(hl.dropna())>1 else 0
-        hp = float(hl.dropna().iloc[-2]) if len(hl.dropna())>1 else 0
-        a14 = atr_calc(h,l,c)
-        atr_now = float(a14.dropna().iloc[-1]) if len(a14.dropna())>0 else np.nan
-        atr_avg = float(a14.rolling(60).mean().dropna().iloc[-1]) if len(a14.dropna())>=60 else np.nan
-        vr = vol_ratio(v, 20)
-
-        criteria = {
-            "SMA 50 Üzerinde": (price > s50, f"{price:.2f} > {s50:.2f}"),
-            "MACD Hist Pozitif & Artıyor": (hn > 0 and hn > hp, f"{hn:.4f}"),
-            "ATR Genişliyor": (not np.isnan(atr_avg) and atr_now > atr_avg, f"{atr_now:.2f} > {atr_avg:.2f}"),
-            "Hacim > 1.2x Ort.": (not np.isnan(vr) and vr > 1.2, f"{vr:.2f}x")
-        }
-        details = { "Fiyat": f"{price:.2f} ₺", "SMA 50": f"{s50:.2f}", "MACD Hist": f"{hn:.4f}", "ATR": f"{atr_now:.2f}", "Hacim": f"{vr:.2f}x" }
-        sc = sum(1 for p,_ in criteria.values() if p)
-        return sc, 4, criteria, details
-    except Exception as e: return 0, 4, {"Hata": (False, str(e))}, {}
-
 def score_claude(df, bm_df, ticker=None):
     """Faiz Pusulası Stratejisi — TCMB faiz rejimini (gevşeme/sıkılaşma/nötr)
     sektör tercihine bağlayan, kalite eleme + trend/göreceli güç skorlamalı
@@ -343,7 +278,12 @@ def score_claude(df, bm_df, ticker=None):
     göreceli güç (BIST100'e göre), faiz rejimine sektörel uyum.
     NOT: Bu strateji, en az 5/7 kriteri geçmeyen adayları havuza hiç
     almaz (bkz. STRATEGY_MIN_SCORE / _pick_portfolio) — zayıf ayda zorla 5 hisse
-    doldurmaz, 4-5 arası pozisyon hedefler."""
+    doldurmaz, 4-5 arası pozisyon hedefler.
+
+    VERİ PENCERESİ NOTU: 6 aylık göreceli güç kriteri 126 iş günü (yaklaşık
+    6 ay) geriye bakar. Çağıran taraf (app.py `period` değişkeni) buna en az
+    ~127 iş günlük tampon bırakmalı — aksi halde bu kriter sistematik olarak
+    N/A döner (bkz. period="9mo" fix)."""
     try:
         c = _c(df); h = _h(df); l = _l(df); v = _v(df)
         if len(c) < 55: return 0, 7, {}, {}
@@ -400,14 +340,13 @@ def score_claude(df, bm_df, ticker=None):
 
 STRATEGY_FN = {
     "emre": (score_emre, "Emre'nin Makro Stratejisi"),
-    "momentum": (score_momentum, "Momentum Kırılımcısı"),
     "claude": (score_claude, "Faiz Pusulası Stratejisi"),
 }
 
 # Bazı stratejiler için minimum kalite eşiği ve hedef pozisyon aralığı.
-# Burada olmayan stratejiler (emre, momentum) eski davranışı korur: skora
-# bakılmaksızın her zaman tam 5 hisse seçilir. "claude" için eşiğin altında
-# kalan adaylar havuza hiç girmez; 4-5 arası pozisyon hedeflenir.
+# Burada olmayan stratejiler (emre) eski davranışı korur: skora bakılmaksızın
+# her zaman tam 5 hisse seçilir. "claude" için eşiğin altında kalan adaylar
+# havuza hiç girmez; 4-5 arası pozisyon hedeflenir.
 STRATEGY_MIN_SCORE = {"claude": 5}
 STRATEGY_TARGET_RANGE = {"claude": (4, 5)}
 
@@ -510,7 +449,11 @@ for k,v in defaults.items():
 with st.sidebar:
     st.markdown("### ⚙️ Ayarlar")
     interval = st.selectbox("Zaman Dilimi", ["1d","1wk"], format_func=lambda x: "Günlük (1D)" if x=="1d" else "Haftalık (1W)")
-    period = "6mo" if interval == "1d" else "2y"
+    # NOT (FIX): "claude" stratejisinin 6 aylık göreceli güç kriteri (rs_score
+    # ile 126 bar geriye bakıyor) eskiden period="6mo"/"2y" ile sistematik N/A
+    # dönüyordu, çünkü 6mo günlük veri ~125 bar civarı geliyor ve 126 barlık
+    # pencereye tampon bırakmıyordu. 9mo/3y bu pencereye rahat tampon bırakır.
+    period = "9mo" if interval == "1d" else "3y"
 
     st.markdown("---")
     st.markdown("### 🔍 Hisse Ara")
@@ -539,8 +482,6 @@ with st.sidebar:
     st.markdown("### 🧭 Stratejiler")
     if st.button("🟠 Emre'nin Makro Stratejisi", use_container_width=True):
         st.session_state.update(strategy="emre", page="scanner", scan_done=False, results=[], selected_ticker=None); st.rerun()
-    if st.button("🟣 Momentum Kırılımcısı", use_container_width=True):
-        st.session_state.update(strategy="momentum", page="scanner", scan_done=False, results=[], selected_ticker=None); st.rerun()
     if st.button("🔵 Faiz Pusulası Stratejisi", use_container_width=True):
         st.session_state.update(strategy="claude", page="scanner", scan_done=False, results=[], selected_ticker=None); st.rerun()
 
@@ -604,10 +545,9 @@ if st.session_state.page == "tlref":
         for ticker, df_t in td.items():
             if df_t is None or len(df_t) < 55: continue
             sc_e, mx_e, _, _ = score_emre(df_t, bm_df, ticker)
-            sc_m, mx_m, _, _ = score_momentum(df_t, bm_df, ticker)
             c_t = _c(df_t); bm_t = _c(bm_df)
             rs = rs_score(c_t, bm_t, 20)
-            rows.append({'Hisse': ticker.replace('.IS',''), 'Sektör': get_sector(ticker), 'Emre Skoru': f"{sc_e}/{mx_e}", 'Momentum Skoru': f"{sc_m}/{mx_m}", 'RS (20g)': f"{rs*100:.1f}%" if not np.isnan(rs) else "N/A", '_es': sc_e})
+            rows.append({'Hisse': ticker.replace('.IS',''), 'Sektör': get_sector(ticker), 'Emre Skoru': f"{sc_e}/{mx_e}", 'RS (20g)': f"{rs*100:.1f}%" if not np.isnan(rs) else "N/A", '_es': sc_e})
         
         if rows:
             df_rows = pd.DataFrame(rows).sort_values('_es', ascending=False).drop(columns=['_es'])
@@ -632,8 +572,8 @@ elif st.session_state.page == "search":
         if st.button("Geri Dön"): st.session_state.page = "scanner"; st.rerun()
         st.stop()
 
-    c1, c2, c3 = st.columns(3)
-    for col, sk in [(c1, "emre"), (c2, "momentum"), (c3, "claude")]:
+    c1, c2 = st.columns(2)
+    for col, sk in [(c1, "emre"), (c2, "claude")]:
         with col:
             fn, label = STRATEGY_FN[sk]
             st.markdown(f"### {label}")
@@ -727,10 +667,9 @@ elif st.session_state.page == "macro":
         if df is None or len(df)<55: continue
         try:
             sc_e,mx_e,_,_ = score_emre(df,bm_df,ticker)
-            sc_m,mx_m,_,_ = score_momentum(df,bm_df,ticker)
             c=_c(df); bm=_c(bm_df)
             rs=rs_score(c,bm,20)
-            rows.append({'Hisse':ticker.replace('.IS',''),'Sektör':get_sector(ticker), 'Emre':f"{sc_e}/{mx_e}",'Momentum':f"{sc_m}/{mx_m}", 'RS (20g)':f"{rs*100:.1f}%" if not np.isnan(rs) else "N/A", 'Fiyat':f"₺{float(c.iloc[-1]):.2f}", '_es':sc_e,'_rs':rs if not np.isnan(rs) else -999})
+            rows.append({'Hisse':ticker.replace('.IS',''),'Sektör':get_sector(ticker), 'Emre':f"{sc_e}/{mx_e}", 'RS (20g)':f"{rs*100:.1f}%" if not np.isnan(rs) else "N/A", 'Fiyat':f"₺{float(c.iloc[-1]):.2f}", '_es':sc_e,'_rs':rs if not np.isnan(rs) else -999})
         except: pass
 
     if rows:
@@ -761,7 +700,7 @@ elif st.session_state.page == "perf":
 
         bt_results={}
         prog=st.progress(0)
-        strategies_to_run = ["emre","momentum","claude"]
+        strategies_to_run = ["emre","claude"]
         for i,sk in enumerate(strategies_to_run):
             prog.progress((i+1)/len(strategies_to_run), text=f"{STRATEGY_FN[sk][1]} hesaplanıyor...")
             pv,bm_n,trades,active,monthly = run_backtest(sk,stock_bt,bm_df_bt,tlref_weekly=tlref_bt)
@@ -776,8 +715,8 @@ elif st.session_state.page == "perf":
         st.stop()
 
     st.markdown("### 📌 Bu Ay Aktif Portföyler")
-    c1,c2,c3 = st.columns(3)
-    for col,sk in zip([c1,c2,c3],["emre","momentum","claude"]):
+    c1,c2 = st.columns(2)
+    for col,sk in zip([c1,c2],["emre","claude"]):
         with col:
             st.markdown(f"**{STRATEGY_FN[sk][1]}**")
             active_list = bt_results[sk].get("active",[])
@@ -788,12 +727,12 @@ elif st.session_state.page == "perf":
 
     st.markdown("---")
     st.markdown("### 📈 Portföy Performansı vs BIST 100")
-    perf_map = {sk:(bt_results[sk]["pv"],bt_results[sk]["bm"]) for sk in ["emre","momentum","claude"] if bt_results[sk].get("pv") is not None}
+    perf_map = {sk:(bt_results[sk]["pv"],bt_results[sk]["bm"]) for sk in ["emre","claude"] if bt_results[sk].get("pv") is not None}
     if perf_map: st.plotly_chart(build_perf_chart(perf_map,100_000), use_container_width=True, config={"displayModeBar":False})
 
     st.markdown("### 📊 Özet İstatistikler")
-    stat_cols = st.columns(3)
-    for col, sk in zip(stat_cols, ["emre","momentum","claude"]):
+    stat_cols = st.columns(2)
+    for col, sk in zip(stat_cols, ["emre","claude"]):
         with col:
             st.markdown(f"**{STRATEGY_FN[sk][1]}**")
             stats = bt_results[sk].get("stats", {})
@@ -804,8 +743,8 @@ elif st.session_state.page == "perf":
                 st.info("Veri yok.")
 
     st.markdown("### 📅 Aylık Portföy ve Getiri Tablosu")
-    mt1, mt2, mt3 = st.tabs([STRATEGY_FN["emre"][1], STRATEGY_FN["momentum"][1], STRATEGY_FN["claude"][1]])
-    for tab, sk in zip([mt1, mt2, mt3], ["emre", "momentum", "claude"]):
+    mt1, mt2 = st.tabs([STRATEGY_FN["emre"][1], STRATEGY_FN["claude"][1]])
+    for tab, sk in zip([mt1, mt2], ["emre", "claude"]):
         with tab:
             m_df = bt_results[sk].get("monthly")
             if m_df is not None and not m_df.empty:
@@ -819,8 +758,8 @@ elif st.session_state.page == "perf":
                 st.info("Aylık tablo bulunamadı.")
 
     st.markdown("### 📋 İşlem Log Defteri (Rebalans Geçmişi)")
-    lt1,lt2,lt3 = st.tabs([STRATEGY_FN["emre"][1], STRATEGY_FN["momentum"][1], STRATEGY_FN["claude"][1]])
-    for tab,sk in zip([lt1,lt2,lt3],["emre","momentum","claude"]):
+    lt1,lt2 = st.tabs([STRATEGY_FN["emre"][1], STRATEGY_FN["claude"][1]])
+    for tab,sk in zip([lt1,lt2],["emre","claude"]):
         with tab:
             trades = bt_results[sk].get("trades")
             if trades is not None and not trades.empty:
