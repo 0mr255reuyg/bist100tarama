@@ -25,10 +25,6 @@ def _rsi(s, n=14):
     l = (-d.clip(upper=0)).rolling(n).mean()
     return 100 - 100 / (1 + g / l.replace(0, np.nan))
 
-def _macd(s, fast=12, slow=26, sig=9):
-    m = _ema(s, fast) - _ema(s, slow); sg = _ema(m, sig)
-    return m, sg, m - sg
-
 def _atr(h, l, c, n=14):
     tr = pd.concat([(h-l), (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
     return tr.rolling(n).mean()
@@ -52,9 +48,9 @@ def _month_starts(index, start, end):
     return list(df_tmp.groupby('ym')['d'].first())
 
 # Bazı stratejiler için minimum kalite eşiği ve hedef pozisyon aralığı.
-# Burada olmayan stratejiler (emre, momentum) eski davranışı korur: skora
-# bakılmaksızın her zaman tam top_n (5) hisse seçilir. "claude" için eşiğin
-# altında kalan adaylar havuza hiç girmez; 4-5 arası pozisyon hedeflenir.
+# Burada olmayan stratejiler (emre) eski davranışı korur: skora bakılmaksızın
+# her zaman tam top_n (5) hisse seçilir. "claude" için eşiğin altında kalan
+# adaylar havuza hiç girmez; 4-5 arası pozisyon hedeflenir.
 STRATEGY_MIN_SCORE = {"claude": 5}
 STRATEGY_TARGET_RANGE = {"claude": (4, 5)}
 
@@ -90,14 +86,6 @@ def _pick_candidates(candidates, strategy, top_n=5, max_per_sector=2):
 # hesaplanır ki backtest, canlı stratejiyle tutarlı bir "makro rüzgar" kriteri
 # kullansın. tlref_weekly verilmezse (ör. EVDS API key yoksa) None döner ve
 # _score_at basit fiyat-trend proxy'sine düşer.
-#
-# DÜZELTME (araştırmayla doğrulandı): Bankacılık ve İnşaat/GMYO'nun asıl
-# avantajı SIKILAŞMADA değil GEVŞEMEDE çıkıyor — faiz düşünce bankaların
-# fonlama maliyeti azalıyor, kredi hacmi büyüyor, tahvil portföylerinden
-# değerleme kârı geliyor; GYO/İnşaat da ucuzlayan finansmandan ve konut
-# talebinden besleniyor. Bu yüzden ikisi de "plato"dan "risk_on"a taşındı.
-# Sıkılaşmada öne çıkanlar savunma karakterli sektörler (gıda/perakende,
-# iletişim, sağlık) — bu kısım zaten doğruydu, değişmedi.
 _REGIME_SECTOR_MAP = {
     "risk_off": ["Gıda ve Perakende", "İletişim", "Sağlık"],
     "risk_on":  ["Banka", "İnşaat ve GMYO", "İnşaat Malzemeleri", "Holding ve Yatırım",
@@ -144,7 +132,7 @@ def _regime_sectors_at(tlref_weekly, date):
 
 # ── 2. KRİTER SKORU (GEÇMİŞ TARİH İÇİN) ───────────────────────────────────────
 def _max_score_for(strategy):
-    return {"emre": 5, "momentum": 4, "claude": 7}.get(strategy, 5)
+    return {"emre": 5, "claude": 7}.get(strategy, 5)
 
 def _score_at(strategy, df, bm_df, date, ticker=None, regime_sectors=None):
     try:
@@ -180,21 +168,6 @@ def _score_at(strategy, df, bm_df, date, ticker=None, regime_sectors=None):
             ]
             total_score = sum(checks) + macro_bonus
             return min(total_score, 5), 5
-
-        elif strategy == "momentum":
-            s50 = float(_sma(c_s, 50).iloc[-1])
-            _, _, hl = _macd(c_s)
-            hn = float(hl.iloc[-1]); hp = float(hl.iloc[-2])
-            a14 = _atr(h_s, lo_s, c_s)
-            atr_now = float(a14.iloc[-1])
-            atr_avg = float(a14.rolling(60).mean().iloc[-1])
-            checks = [
-                price > s50,
-                hn > 0 and hn > hp,
-                (not np.isnan(atr_avg)) and atr_now > atr_avg,
-                (not np.isnan(vr)) and vr > 1.2,
-            ]
-            return sum(checks), 4
 
         elif strategy == "claude":
             # Faiz Pusulası Stratejisi — TCMB faiz rejimini (gevşeme/sıkılaşma/nötr)
@@ -277,14 +250,7 @@ def run_backtest(strategy, stock_data, benchmark_df, tlref_weekly=None, start_ca
         regime_sectors = _regime_sectors_at(tlref_weekly, rdate)
 
         # 1c. NOKTA-ZAMANLI FİLTRE (survivorship/point-in-time bias düzeltmesi):
-        # Bu rebalans tarihinde FİİLEN BIST100 üyesi olan ticker'lar. membership.py
-        # olmadan önce burada TÜM stock_data (yani BUGÜNÜN ~100 hissesi) taranıyordu
-        # — bu da bugün endekste olan ama o tarihte olmayan hisseleri "varmış gibi"
-        # alıyor, o tarihte gerçekten üye olup bugün endeksten çıkmış hisseleri
-        # (AGHOL, TABGD, BERA, SDTTR gibi) ise o dönemler için hiç yokmuş gibi
-        # gösteriyordu. NOT: Bunun işe yaraması için stock_data'nın BUGÜNÜN değil,
-        # get_all_tickers_ever() (membership.py) evreninin fiyat verisini içermesi
-        # gerekir — bu kısım app.py'de düzeltilecek.
+        # Bu rebalans tarihinde FİİLEN BIST100 üyesi olan ticker'lar.
         point_in_time_members = set(get_constituents_at(rdate))
 
         # 2. Hisse Havuzunu Tara ve Puanla
@@ -405,8 +371,8 @@ def calc_stats(pv_df, bm_norm, start_capital):
     alpha = total - bm_ret if bm_ret is not None else None
     return {'Toplam Getiri': f"{total:+.1f}%", 'CAGR': f"{cagr:+.1f}%", 'Max Drawdown': f"{max_dd:.1f}%", 'BIST100 Getirisi': f"{bm_ret:+.1f}%" if bm_ret is not None else 'N/A', 'Alpha': f"{alpha:+.1f}%" if alpha is not None else 'N/A', 'Son Değer': f"₺{pv.iloc[-1]:,.0f}"}
 
-STRAT_COLORS = { 'emre': '#f59e0b', 'momentum': '#a78bfa', 'claude': '#38bdf8' }
-STRAT_LABELS = { 'emre': "🟠 Emre'nin Makro Stratejisi", 'momentum': '🟣 Momentum', 'claude': '🔵 Faiz Pusulası Stratejisi' }
+STRAT_COLORS = { 'emre': '#f59e0b', 'claude': '#38bdf8' }
+STRAT_LABELS = { 'emre': "🟠 Emre'nin Makro Stratejisi", 'claude': '🔵 Faiz Pusulası Stratejisi' }
 
 def build_perf_chart(results_map, start_capital):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.68, 0.32], vertical_spacing=0.04)
