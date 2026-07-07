@@ -31,6 +31,12 @@ guvenilip AGHOL tum donemlerde tutuldu. Bu yuzden listeler ~100 degil ~101
 ticker iceriyor - backtest sonucuna etkisi ihmal edilebilir duzeyde (1/100
 pozisyon havuzu farki).
 
+DUZELTME (2026-07 donemi): BERA, 2026-04-01 doneminde listede varken
+2026-07-01 doneminde yanlislikla dusmustu. Resmi Q3 2026 (1 Temmuz-30 Eylul)
+duyurusunda BERA'nin endeksten cikarildigina dair bir kayit YOK (yalnizca
+AGHOL, TABGD, TUREX cikti; ODINE, IEYHO, ESEN girdi) - bu yuzden BERA
+2026-07-01 listesine geri eklendi.
+
 GUNCELLEME SORUMLULUGU:
 Bu liste otomatik BUYUMEZ. Her ceyrek (Ocak/Nisan/Temmuz/Ekim basi) Borsa
 Istanbul yeni bir revizyon yayinladiginda, en altta tanimli
@@ -158,19 +164,45 @@ MEMBERSHIP_HISTORY: dict[str, list[str]] = {
     ],
     "2026-07-01": [
         "AEFES","AKBNK","AKSA","AKSEN","ALARK","ALTNY","ANSGR","ARCLK","ASELS","ASTOR",
-        "BALSU","BIMAS","BRSAN","BRYAT","BSOKE","BTCIM","CANTE","CCOLA","CIMSA","CVKMD",
-        "CWENE","DAPGM","DOAS","DOHOL","DSTKF","ECILC","EFORC","EKGYO","ENERY","ENJSA",
-        "ENKAI","EREGL","ESEN","EUPWR","EUREN","FENER","FROTO","GARAN","GENIL","GESAN",
-        "GLRMK","GRSEL","GRTHO","GSRAY","GUBRF","HALKB","HEKTS","IEYHO","IPEKE","ISCTR",
-        "ISMEN","IZENR","KCHOL","KLRHO","KONTR","KOZAA","KOZAL","KRDMD","KTLEV","KUYAS",
-        "MAGEN","MAVI","MGROS","MIATK","MPARK","OBAMS","ODAS","ODINE","OTKAR","OYAKC",
-        "PAHOL","PASEU","PATEK","PETKM","PGSUS","PSGYO","QUAGR","RALYH","REEDR","SAHOL",
-        "SARKY","SASA","SISE","SKBNK","SOKM","TAVHL","TCELL","THYAO","TKFEN","TOASO",
-        "TSKB","TTKOM","TUKAS","TUPRS","TURSG","ULKER","VAKBN","VESTL","YAZIC","YKBNK","ZOREN",
+        "BALSU","BERA","BIMAS","BRSAN","BRYAT","BSOKE","BTCIM","CANTE","CCOLA","CIMSA",
+        "CVKMD","CWENE","DAPGM","DOAS","DOHOL","DSTKF","ECILC","EFORC","EKGYO","ENERY",
+        "ENJSA","ENKAI","EREGL","ESEN","EUPWR","EUREN","FENER","FROTO","GARAN","GENIL",
+        "GESAN","GLRMK","GRSEL","GRTHO","GSRAY","GUBRF","HALKB","HEKTS","IEYHO","IPEKE",
+        "ISCTR","ISMEN","IZENR","KCHOL","KLRHO","KONTR","KOZAA","KOZAL","KRDMD","KTLEV",
+        "KUYAS","MAGEN","MAVI","MGROS","MIATK","MPARK","OBAMS","ODAS","ODINE","OTKAR",
+        "OYAKC","PAHOL","PASEU","PATEK","PETKM","PGSUS","PSGYO","QUAGR","RALYH","REEDR",
+        "SAHOL","SARKY","SASA","SISE","SKBNK","SOKM","TAVHL","TCELL","THYAO","TKFEN",
+        "TOASO","TSKB","TTKOM","TUKAS","TUPRS","TURSG","ULKER","VAKBN","VESTL","YAZIC",
+        "YKBNK","ZOREN",
     ],
 }
 
 _SORTED_PERIOD_STARTS = sorted(pd.Timestamp(d) for d in MEMBERSHIP_HISTORY)
+
+# ── TICKER YENIDEN ISIMLENDIRME HARITASI ──────────────────────────────────────
+# Bazi sirketler unvan/kod degisikligi geciriyor - AYNI sirket, sadece islem
+# kodu degisiyor. Bunlari gercek endeks giris/cikis sanmamak icin, canli
+# veriyle karsilastirmadan once normalize ediyoruz.
+#
+# KOZAA -> TRMET, KOZAL -> TRALT, IPEKE -> TRENJ: 24 Kasim 2025'te Borsa
+# Istanbul'un resmi duyurusuyla unvan degisikligi yapildi (Koza Anadolu Metal
+# -> TR Anadolu Metal Madencilik, Koza Altin -> Turk Altin Isletmeleri,
+# Ipek Dogal Enerji -> TR Dogal Enerji Kaynaklari). Sirketler AYNI, sadece
+# kod degisti. Bu harita olmadan borsapy'nin canli cektigi yeni kodlar
+# (TRMET/TRALT/TRENJ), membership.py'deki eski kodlarla (KOZAA/KOZAL/IPEKE)
+# eslenemiyor ve _detect_new_revision bunu sahte bir giris+cikis olarak
+# raporluyordu.
+TICKER_RENAME_MAP: dict[str, str] = {
+    "KOZAA": "TRMET",
+    "KOZAL": "TRALT",
+    "IPEKE": "TRENJ",
+}
+
+
+def _normalize_renames(tickers: set[str]) -> set[str]:
+    """Eski (kayitli) kodlari yeni (canli) kodlara cevirir ki karsilastirma
+    unvan degisikliklerini gercek uyelik degisikligi sanmasin."""
+    return {TICKER_RENAME_MAP.get(t, t) for t in tickers}
 
 
 def get_constituents_at(date) -> list[str]:
@@ -211,10 +243,15 @@ def _detect_new_revision(live_tickers: set[str]) -> str | None:
     ticker kumesini en son kayitli donemle karsilastirir. Fark varsa
     okunabilir bir uyari metni dondurur, yoksa None. Bu fonksiyon otomatik
     GUNCELLEMEZ - sadece "yeni bir ceyrek revizyonu olmus, MEMBERSHIP_HISTORY
-    dosyasina yeni bir donem eklemek gerekiyor" diye haber verir."""
-    current = set(get_current_constituents())
-    added = live_tickers - current
-    removed = current - live_tickers
+    dosyasina yeni bir donem eklemek gerekiyor" diye haber verir.
+
+    FIX: karsilastirmadan once hem kayitli hem canli kume TICKER_RENAME_MAP
+    ile normalize edilir - boylece unvan/kod degisikligi (KOZAA/KOZAL/IPEKE
+    -> TRMET/TRALT/TRENJ gibi) sahte giris+cikis olarak raporlanmaz."""
+    current = _normalize_renames(set(get_current_constituents()))
+    live_norm = _normalize_renames(live_tickers)
+    added = live_norm - current
+    removed = current - live_norm
     if not added and not removed:
         return None
     msg = ["Yeni BIST100 revizyonu algilandi (kayitli listeyle fark var):"]
