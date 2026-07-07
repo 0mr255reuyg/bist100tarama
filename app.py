@@ -270,7 +270,8 @@ def get_macro_regime():
     elif sma8 < sma54 and m_di > p_di and adx_val >= 20:
         regime = "Büyüme (Risk On — Faiz Düşüyor)"
         sectors = ["Banka", "İnşaat ve GMYO", "İnşaat Malzemeleri", "Holding ve Yatırım",
-                   "Otomotiv", "Sanayi ve Kimya", "Teknoloji ve Yazılım", "Enerji"]
+                   "Otomotiv", "Sanayi ve Kimya", "Teknoloji ve Yazılım", "Enerji",
+                   "Finansal Kiralama ve Faktoring"]
     else:
         regime = "Denge (Plato)"
         sectors = ["Ulaşım ve Turizm"]
